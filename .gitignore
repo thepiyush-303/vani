@@ -1,0 +1,6 @@
+node_modules
+.env
+PRD.md
+CLAUDE.md
+PROGRESS.md
+run-smoke.sh
