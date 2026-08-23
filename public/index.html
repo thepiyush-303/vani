@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QuickPass Voice Agent</title>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a22;
+      --border: #2a2a38;
+      --accent: #6c63ff;
+      --accent-dim: #3d3880;
+      --text: #e8e8f0;
+      --muted: #7878a0;
+      --success: #3ddc97;
+      --warn: #f5a623;
+      --danger: #ff5f57;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 2rem;
+      width: 420px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    }
+
+    h1 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--text);
+    }
+
+    h1 span { color: var(--accent); }
+
+    /* ── Status pill ── */
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background 0.25s;
+    }
+
+    .dot.idle     { background: var(--muted); }
+    .dot.listening { background: var(--success); box-shadow: 0 0 6px var(--success); animation: pulse 1s infinite; }
+    .dot.active   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .dot.error    { background: var(--danger); }
+
+    @keyframes pulse {
+      0%,100% { opacity:1; } 50% { opacity:0.4; }
+    }
+
+    #state-label { font-weight: 500; color: var(--text); }
+
+    /* ── Meter ── */
+    .meter-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .meter-label {
+      font-size: 0.75rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .meter-bar {
+      height: 6px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+      border-radius: 3px;
+      transition: width 0.06s ease-out;
+    }
+
+    /* ── Transcript ── */
+    .transcript-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      font-size: 0.9rem;
+      min-height: 70px;
+      line-height: 1.6;
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    .transcript-box .partial { color: var(--muted); font-style: italic; }
+    .transcript-box .final   { color: var(--text); }
+
+    /* ── Buttons ── */
+    .btn-row { display: flex; gap: 0.75rem; }
+
+    button {
+      flex: 1;
+      padding: 0.65rem 1rem;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s, transform 0.1s;
+    }
+
+    button:active { transform: scale(0.97); }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #btn-connect    { background: var(--accent); color: #fff; }
+    #btn-disconnect { background: var(--border); color: var(--text); }
+
+    /* ── Log ── */
+    .log {
+      font-size: 0.75rem;
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.8rem;
+      height: 120px;
+      overflow-y: auto;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .log .entry { line-height: 1.4; }
+    .log .entry.in  { color: var(--success); }
+    .log .entry.out { color: var(--accent); }
+    .log .entry.err { color: var(--danger); }
+    .log .entry.sys { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Quick<span>Pass</span> Voice Agent</h1>
+
+    <div class="status-row">
+      <div class="dot idle" id="status-dot"></div>
+      <span id="state-label">Disconnected</span>
+    </div>
+
+    <div class="meter-wrap">
+      <div class="meter-label">VAD Confidence</div>
+      <div class="meter-bar"><div class="meter-fill" id="vad-meter"></div></div>
+    </div>
+
+    <div class="transcript-box" id="transcript">
+      <span class="partial">Waiting for speech…</span>
+    </div>
+
+    <div class="btn-row">
+      <button id="btn-connect">Connect</button>
+      <button id="btn-disconnect" disabled>Disconnect</button>
+    </div>
+
+    <div class="log" id="log"></div>
+  </div>
+
+  <!--
+    @ricky0123/vad-web bundles ONNX Runtime WASM + Silero model.
+    ort-wasm-simd-threaded.wasm is served from the same CDN via import map.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.0/dist/ort.min.js"></script>
+  <script type="module" src="client.js"></script>
+</body>
+</html>
