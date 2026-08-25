@@ -16,8 +16,6 @@
  *   minSpeechFrames=3, preSpeechPadFrames=5, redemptionFrames=8
  */
 
-import { MicVAD } from 'https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.22/dist/bundle.min.js';
-
 // ── Config ────────────────────────────────────────────────────────────────────
 
 const WS_URL      = 'ws://localhost:8765';
@@ -232,7 +230,7 @@ function handleBinaryFrame(data) {
 async function initVAD() {
   log('Initializing Silero VAD…', 'sys');
 
-  vad = await MicVAD.new({
+  vad = await window.vad.MicVAD.new({
     ...VAD_CONFIG,
 
     // PRD §2.2 onSpeechStart: send speech_start + begin PCM streaming

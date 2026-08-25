@@ -8,9 +8,16 @@ import { v4 as uuidv4 } from 'uuid';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as dotenv from 'dotenv';
 import { SessionInitMessage, ServerMessage } from './types';
 import { createSession, SessionStore } from './session';
-import { handleTextMessage, handleBinaryMessage } from './messageHandler';
+import { handleTextMessage, handleBinaryMessage, handleInternalEvent } from './messageHandler';
+import { initSubprocesses } from './sideEffects';
+import * as whisperProcess from './whisperProcess';
+import * as piperProcess from './piperProcess';
+
+dotenv.config();
+
 
 const PORT = parseInt(process.env.PORT ?? '8765', 10);
 const HTTP_PORT = parseInt(process.env.HTTP_PORT ?? '3000', 10);
@@ -59,6 +66,19 @@ httpServer.listen(HTTP_PORT, () => {
 
 console.log(`[server] WebSocket server listening on port ${PORT}`);
 
+// ── Initialize subprocesses (Whisper + Piper) ─────────────────
+// Wire internal Whisper transcript events through the state machine.
+initSubprocesses((eventType, payload) => {
+  const ctx = SessionStore.get();
+  if (!ctx) return;  // no active session — discard event
+  const ws = activeWs;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  handleInternalEvent(eventType, payload, ws, ctx);
+});
+
+// Track the currently active WS connection for subprocess callbacks
+let activeWs: WebSocket | null = null;
+
 wss.on('connection', (ws: WebSocket) => {
   // ── Single-session guard ───────────────────────────────────
   if (SessionStore.has()) {
@@ -75,6 +95,8 @@ wss.on('connection', (ws: WebSocket) => {
     return;
   }
 
+  // Track this connection for subprocess callbacks
+  activeWs = ws;
   console.log('[server] Client connected — waiting for session_init');
 
   // ── Wait for session_init handshake ──────────────────────
@@ -152,6 +174,7 @@ wss.on('connection', (ws: WebSocket) => {
     const sessionId = SessionStore.get()?.sessionId ?? 'unknown';
     console.log(`[server] Connection closed — session=${sessionId} code=${code} reason=${reason.toString() || '(none)'}`);
     SessionStore.clear();
+    activeWs = null;
     initialized = false;
   });
 
@@ -169,6 +192,8 @@ wss.on('error', (err) => {
 // ── Graceful shutdown ──────────────────────────────────────────
 process.on('SIGINT', () => {
   console.log('\n[server] SIGINT received — shutting down gracefully');
+  whisperProcess.stop();
+  piperProcess.stop();
   httpServer.close();
   wss.close(() => {
     console.log('[server] Server closed');
@@ -178,6 +203,8 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   console.log('[server] SIGTERM received — shutting down gracefully');
+  whisperProcess.stop();
+  piperProcess.stop();
   httpServer.close();
   wss.close(() => process.exit(0));
 });

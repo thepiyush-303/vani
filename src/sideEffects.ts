@@ -1,25 +1,93 @@
 // ============================================================
-// sideEffects.ts — Stub dispatcher for state machine effects
-// Phase 1: all handlers log and return. Real I/O wired in
-// Phases 3 (Whisper/Piper) and 4 (Groq/barge-in).
+// sideEffects.ts — Side effect dispatcher
+// Phase 4: Groq LLM streaming replaces Phase 3 stubs.
 // ============================================================
 
-import { SideEffectName, SessionContext, ServerMessage, ServerState } from './types';
 import WebSocket from 'ws';
+import { SideEffectName, SessionContext, ServerMessage, ServerState, IncomingEventType } from './types';
+import * as whisperProcess from './whisperProcess';
+import * as piperProcess from './piperProcess';
+import { SentenceBuffer } from './sentenceBuffer';
+import { startGroqStream, abortGroqStream } from './groqStream';
+import { setActiveSentenceBuffer } from './sharedState';
+
+// ── Sentence buffer & internal event callback ─────────────────
+
+let sentenceBuffer: SentenceBuffer | null = null;
+let activeWs: WebSocket | null = null;
+
+// Set by server.ts so Groq callbacks can fire handleInternalEvent
+let internalEventEmitter: ((event: IncomingEventType, payload?: unknown) => void) | null = null;
+
+export function setInternalEventEmitter(
+  emitter: (event: IncomingEventType, payload?: unknown) => void
+): void {
+  internalEventEmitter = emitter;
+}
+
+export function getActiveWs(): WebSocket | null { return activeWs; }
+
+function getSentenceBuffer(ws: WebSocket): SentenceBuffer {
+  if (!sentenceBuffer) {
+    sentenceBuffer = new SentenceBuffer((sentence) => {
+      piperProcess.synthesize(sentence, ws);
+    });
+  }
+  return sentenceBuffer;
+}
+
+function resetSentenceBuffer(): void {
+  sentenceBuffer?.reset();
+  sentenceBuffer = null;
+}
+
+// ── Public: register Whisper + Piper at server startup ────────
+
+/**
+ * Called once at server startup to spawn subprocesses and wire
+ * Whisper transcript events into the state machine.
+ * @param emitInternalEvent  Callback into messageHandler/server to fire internal events
+ */
+export function initSubprocesses(
+  emitInternalEvent: (event: IncomingEventType, payload?: unknown) => void
+): void {
+  // Store so Groq callback can also fire internal events
+  internalEventEmitter = emitInternalEvent;
+
+  // Wire Whisper transcript events → internal state machine events
+  whisperProcess.onWhisperEvent((ev) => {
+    switch (ev.type) {
+      case 'partial':
+        emitInternalEvent('whisper_partial', { text: ev.text });
+        break;
+      case 'final':
+        emitInternalEvent('whisper_final', { text: ev.text, duration_ms: ev.duration_ms });
+        break;
+      case 'error':
+        emitInternalEvent('whisper_error', { code: ev.code, msg: ev.msg });
+        break;
+    }
+  });
+
+  // Start Whisper subprocess
+  whisperProcess.start();
+
+  // Start Piper subprocess (optional — warns if model not configured)
+  piperProcess.start();
+}
+
+// ── Dispatcher ─────────────────────────────────────────────────
 
 export interface SideEffectContext {
   ws: WebSocket;
   ctx: SessionContext;
 }
 
-/**
- * Dispatch a list of named side-effects in order.
- * All handlers are stubs in Phase 1.
- */
 export function dispatchSideEffects(
   effects: SideEffectName[],
   { ws, ctx }: SideEffectContext,
 ): void {
+  activeWs = ws;
   for (const effect of effects) {
     switch (effect) {
       case 'OPEN_WHISPER_PIPE':
@@ -32,16 +100,16 @@ export function dispatchSideEffects(
         discardWhisperBuffer(ctx);
         break;
       case 'START_GROQ_STREAM':
-        startGroqStream(ctx);
+        triggerGroqStream(ctx);
         break;
       case 'ABORT_GROQ_STREAM':
-        abortGroqStream(ctx);
+        triggerAbortGroq(ctx);
         break;
       case 'SPAWN_PIPER':
-        spawnPiper(ctx);
+        spawnPiper(ws, ctx);
         break;
       case 'KILL_PIPER':
-        killPiper(ctx);
+        killPiper(ws, ctx);
         break;
       case 'SEND_FILLER_TTS':
         sendFillerTts(ws, ctx);
@@ -58,43 +126,107 @@ export function dispatchSideEffects(
   }
 }
 
-// ── Stub handlers ─────────────────────────────────────────────
+// ── Real Whisper side-effects ──────────────────────────────────
 
 function openWhisperPipe(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] OPEN_WHISPER_PIPE — will spawn faster_whisper_server.py in Phase 3`);
-  // Phase 1: clear audio buffer for new utterance
   ctx.audioBuffer = [];
+  whisperProcess.start(); // idempotent — no-op if already running
+  console.log(`[${ctx.sessionId}] OPEN_WHISPER_PIPE — audio buffer cleared, Whisper ready`);
 }
 
 function sendEofToWhisper(ctx: SessionContext): void {
-  const byteCount = ctx.audioBuffer.reduce((sum, b) => sum + b.length, 0);
-  console.log(`[stub][${ctx.sessionId}] SEND_EOF_TO_WHISPER — ${ctx.audioBuffer.length} frames (${byteCount} bytes) buffered`);
+  const frameCount = ctx.audioBuffer.length;
+  const byteCount  = ctx.audioBuffer.reduce((s, b) => s + b.length, 0);
+  console.log(`[${ctx.sessionId}] SEND_EOF_TO_WHISPER — flushing ${frameCount} frames (${byteCount} bytes)`);
+
+  // Write all buffered PCM frames to Whisper stdin
+  for (const chunk of ctx.audioBuffer) {
+    whisperProcess.writeChunk(chunk);
+  }
+  ctx.audioBuffer = [];
+
+  // Send end-of-utterance sentinel
+  whisperProcess.sendEof();
 }
 
 function discardWhisperBuffer(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] DISCARD_WHISPER_BUFFER — dropping ${ctx.audioBuffer.length} frames`);
+  console.log(`[${ctx.sessionId}] DISCARD_WHISPER_BUFFER — dropping ${ctx.audioBuffer.length} frames`);
   ctx.audioBuffer = [];
+  whisperProcess.discard();
 }
 
-function startGroqStream(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] START_GROQ_STREAM — will call Groq API in Phase 4`);
+// ── Real Piper side-effects ────────────────────────────────────
+
+function spawnPiper(ws: WebSocket, ctx: SessionContext): void {
+  const buf = new SentenceBuffer((sentence) => {
+    piperProcess.synthesize(sentence, ws);
+  });
+  sentenceBuffer = buf;
+  setActiveSentenceBuffer(buf);   // share with messageHandler llm_token handler
+  console.log(`[${ctx.sessionId}] SPAWN_PIPER — sentence buffer active`);
 }
 
-function abortGroqStream(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] ABORT_GROQ_STREAM — will call AbortController.abort() in Phase 4`);
-}
+function killPiper(ws: WebSocket, ctx: SessionContext): void {
+  console.log(`[${ctx.sessionId}] KILL_PIPER — barge-in flush`);
+  resetSentenceBuffer();
+  setActiveSentenceBuffer(null);   // clear messageHandler reference
+  piperProcess.kill();
 
-function spawnPiper(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] SPAWN_PIPER — will spawn piper binary in Phase 3`);
-}
-
-function killPiper(ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] KILL_PIPER — will SIGTERM piper process in Phase 3`);
+  const msg: ServerMessage = {
+    type: 'tts_interrupted',
+    session_id: ctx.sessionId,
+    reason: 'barge_in',
+    timestamp_ms: Date.now(),
+  };
+  sendJson(ws, msg);
 }
 
 function sendFillerTts(ws: WebSocket, ctx: SessionContext): void {
-  console.log(`[stub][${ctx.sessionId}] SEND_FILLER_TTS — will pipe filler phrase to Piper in Phase 3`);
+  console.log(`[${ctx.sessionId}] SEND_FILLER_TTS`);
+  piperProcess.sendFillerPhrase(ws);
 }
+
+// ── Groq LLM side-effects ─────────────────────────────────────
+
+function triggerGroqStream(ctx: SessionContext): void {
+  if (!internalEventEmitter) {
+    console.warn(`[${ctx.sessionId}] START_GROQ_STREAM: internalEventEmitter not set`);
+    return;
+  }
+
+  const emit = internalEventEmitter;
+
+  // Fire-and-forget (async stream runs in background)
+  startGroqStream(ctx, (ev) => {
+    switch (ev.type) {
+      case 'llm_token':
+        emit('llm_token', { delta: ev.delta, tokenIndex: ev.tokenIndex });
+        break;
+      case 'llm_tool_call':
+        emit('llm_tool_call', { name: ev.name, args: ev.args });
+        break;
+      case 'llm_stream_complete':
+        emit('llm_stream_complete', { fullText: ev.fullText });
+        break;
+      case 'llm_error':
+        console.error(`[groq] Error ${ev.code}: ${ev.msg}`);
+        emit('whisper_error', { code: ev.code, msg: ev.msg }); // reuse error path to reset to IDLE
+        break;
+    }
+  }).catch((err) => {
+    console.error(`[groq] Unhandled stream error: ${err}`);
+    emit('whisper_error', { code: 'GROQ_FATAL', msg: String(err) });
+  });
+
+  console.log(`[${ctx.sessionId}] START_GROQ_STREAM — Groq stream initiated`);
+}
+
+function triggerAbortGroq(ctx: SessionContext): void {
+  console.log(`[${ctx.sessionId}] ABORT_GROQ_STREAM — aborting Groq stream`);
+  abortGroqStream();
+}
+
+// ── Completion & error messages ───────────────────────────────
 
 function sendTurnComplete(ws: WebSocket, ctx: SessionContext): void {
   const latency = ctx.turnStartedAt !== null
@@ -109,10 +241,13 @@ function sendTurnComplete(ws: WebSocket, ctx: SessionContext): void {
     timestamp_ms: Date.now(),
   };
 
-  ws.send(JSON.stringify(msg));
+  sendJson(ws, msg);
   ctx.turnStartedAt = null;
-  ctx.tokenCount = 0;
-  console.log(`[${ctx.sessionId}] turn_complete sent (latency=${latency}ms)`);
+  ctx.tokenCount    = 0;
+  piperProcess.kill();       // Drain Piper after turn completes
+  resetSentenceBuffer();
+  setActiveSentenceBuffer(null);  // clear messageHandler reference
+  console.log(`[${ctx.sessionId}] turn_complete (latency=${latency}ms)`);
 }
 
 function notifyClientError(ws: WebSocket, ctx: SessionContext): void {
@@ -124,11 +259,11 @@ function notifyClientError(ws: WebSocket, ctx: SessionContext): void {
     recoverable: true,
     timestamp_ms: Date.now(),
   };
-  ws.send(JSON.stringify(msg));
+  sendJson(ws, msg);
   console.error(`[${ctx.sessionId}] Whisper error — sent error frame to client`);
 }
 
-// ── Helper: send any typed server message ─────────────────────
+// ── WS helpers ─────────────────────────────────────────────────
 
 export function sendJson(ws: WebSocket, msg: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
@@ -136,14 +271,12 @@ export function sendJson(ws: WebSocket, msg: ServerMessage): void {
   }
 }
 
-// ── Transition helper: emit state_change to client ───────────
-
 export function emitStateChange(
   ws: WebSocket,
   from: ServerState,
   to: ServerState,
 ): void {
-  if (from === to) return; // don't emit no-op state changes (e.g., LISTENING → LISTENING for PCM frames)
+  if (from === to) return;
   const msg: ServerMessage = {
     type: 'state_change',
     from,

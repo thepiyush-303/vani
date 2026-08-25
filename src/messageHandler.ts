@@ -4,9 +4,10 @@
 // ============================================================
 
 import WebSocket from 'ws';
-import { SessionContext, ServerState, ClientMessage, ServerMessage } from './types';
+import { SessionContext, ServerState, ClientMessage, ServerMessage, IncomingEventType } from './types';
 import { transition, isTransitionError } from './stateMachine';
 import { dispatchSideEffects, emitStateChange, sendJson } from './sideEffects';
+import { getActiveSentenceBuffer, setActiveSentenceBuffer } from './sharedState';
 
 /**
  * Handle a text (JSON) message from the client.
@@ -137,4 +138,114 @@ function sendError(
     timestamp_ms: Date.now(),
   };
   sendJson(ws, msg);
+}
+
+/**
+ * Handle internal events fired by subprocess callbacks (Whisper, Piper, Groq).
+ * Called from server.ts when a subprocess emits a transcript or error.
+ */
+export function handleInternalEvent(
+  eventType: IncomingEventType,
+  payload: unknown,
+  ws: WebSocket,
+  ctx: SessionContext,
+): void {
+  const p = payload as Record<string, unknown> | undefined;
+
+  switch (eventType) {
+    case 'whisper_partial': {
+      // Send transcript_partial to browser; no state change
+      const text = (p?.text as string) ?? '';
+      const msg: ServerMessage = {
+        type: 'transcript_partial',
+        session_id: ctx.sessionId,
+        text,
+        confidence: null,
+        timestamp_ms: Date.now(),
+      };
+      sendJson(ws, msg);
+      break;
+    }
+
+    case 'whisper_final': {
+      const text        = (p?.text as string) ?? '';
+      const duration_ms = (p?.duration_ms as number) ?? 0;
+
+      // 1. Send transcript_final to browser
+      const msg: ServerMessage = {
+        type: 'transcript_final',
+        session_id: ctx.sessionId,
+        text,
+        duration_ms,
+        timestamp_ms: Date.now(),
+      };
+      sendJson(ws, msg);
+      console.log(`[${ctx.sessionId}] transcript_final: "${text.slice(0, 80)}"`);
+
+      // 2. Append user turn to conversation history for Groq multi-turn
+      ctx.conversationHistory.push({ role: 'user', content: text });
+
+      // 3. Transition TRANSCRIBING → LLM_STREAMING
+      // START_GROQ_STREAM side-effect will call triggerGroqStream() in sideEffects.ts
+      runTransition(ws, ctx, 'whisper_final');
+      break;
+    }
+
+    case 'whisper_error': {
+      const msg_str = (p?.msg as string) ?? 'Unknown STT error';
+      console.error(`[${ctx.sessionId}] whisper_error: ${msg_str}`);
+      runTransition(ws, ctx, 'whisper_error');
+      break;
+    }
+
+    case 'llm_token': {
+      const delta      = (p?.delta as string) ?? '';
+      const tokenIndex = (p?.tokenIndex as number) ?? 0;
+
+      // 1. Stream token to browser for live text display
+      const msg: ServerMessage = {
+        type: 'llm_token',
+        session_id: ctx.sessionId,
+        delta,
+        token_index: tokenIndex,
+        timestamp_ms: Date.now(),
+      };
+      sendJson(ws, msg);
+
+      // 2. Feed token to sentence buffer → fires Piper synthesis at sentence boundaries
+      const activeSentenceBuffer = getActiveSentenceBuffer();
+      if (activeSentenceBuffer) {
+        activeSentenceBuffer.append(delta);
+      }
+
+      // 3. Transition LLM_STREAMING → TTS_STREAMING on first token
+      if (ctx.state === ServerState.LLM_STREAMING) {
+        runTransition(ws, ctx, 'llm_token');
+      }
+      break;
+    }
+
+    case 'llm_stream_complete': {
+      // Flush any remaining buffered text to Piper
+      const activeSentenceBuffer = getActiveSentenceBuffer();
+      if (activeSentenceBuffer) {
+        activeSentenceBuffer.flush();
+        setActiveSentenceBuffer(null);
+      }
+      // Transition to IDLE; side-effect SEND_TURN_COMPLETE sends metrics to browser
+      runTransition(ws, ctx, 'llm_stream_complete');
+      break;
+    }
+
+    case 'llm_tool_call': {
+      // Transition LLM_STREAMING → TOOL_EXECUTING; SEND_FILLER_TTS plays "One moment..."
+      // Tool execution logic wired in Phase 5
+      runTransition(ws, ctx, 'llm_tool_call');
+      console.log(`[${ctx.sessionId}] llm_tool_call: ${String(p?.name)} (Phase 5 stub)`);
+      break;
+    }
+
+    default:
+      console.log(`[${ctx.sessionId}] Unhandled internal event: ${eventType}`);
+  }
 }

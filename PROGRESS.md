@@ -1,7 +1,7 @@
 # Project Progress Tracker
 
 ## CURRENT STATUS
-**Phase 3** — Phase 2 complete. Starting Phase 3: Whisper STT & Piper TTS Subprocess Integration.
+**Phase 5** — Phase 4 complete. Starting Phase 5: Tool Calling Contracts & Execution.
 
 ---
 
@@ -18,16 +18,16 @@
 - [x] Stream binary PCM audio chunks from client VAD to WebSocket server.
 
 ## Phase 3: Whisper STT & Piper TTS Subprocess Integration
-- [ ] Create persistent `faster_whisper_server.py` subprocess with length-prefixed stdin protocol.
-- [ ] Route incoming WebSocket PCM streams to Whisper subprocess.
-- [ ] Set up persistent Piper TTS subprocess taking JSON-line stdin and outputting raw PCM.
-- [ ] Implement sentence boundary buffering for Piper text input chunks.
+- [x] Create persistent `faster_whisper_server.py` subprocess with length-prefixed stdin protocol.
+- [x] Route incoming WebSocket PCM streams to Whisper subprocess.
+- [x] Set up persistent Piper TTS subprocess taking JSON-line stdin and outputting raw PCM.
+- [x] Implement sentence boundary buffering for Piper text input chunks.
 
 ## Phase 4: LLM Integration & Event Orchestration
-- [ ] Connect Groq API (Llama 3.1) for LLM streaming completions.
-- [ ] Pipe partial and final Whisper transcripts to the Groq LLM context.
-- [ ] Route Groq LLM text deltas through the sentence buffer to Piper TTS.
-- [ ] Stream synthesized chunks from Piper back to the client WebSocket.
+- [x] Connect Groq API (Llama 3.1) for LLM streaming completions.
+- [x] Pipe partial and final Whisper transcripts to the Groq LLM context.
+- [x] Route Groq LLM text deltas through the sentence buffer to Piper TTS.
+- [x] Stream synthesized chunks from Piper back to the client WebSocket.
 
 ## Phase 5: Tool Calling Contracts & Execution
 - [ ] Register `order_food`, `book_flight`, `get_weather`, `get_news`, and `search_browser` tool definitions with Groq.
