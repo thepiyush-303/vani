@@ -28,6 +28,7 @@ export type SideEffectName =
   | 'SEND_FILLER_TTS'
   | 'SEND_TURN_COMPLETE'
   | 'NOTIFY_CLIENT_ERROR'
+  | 'EXECUTE_TOOL'
   | 'NOOP';
 
 // ── Incoming Events (from client or internal) ─────────────────
@@ -210,4 +211,6 @@ export interface SessionContext {
   // Set just before a NOTIFY_CLIENT_ERROR side-effect so the dispatcher can
   // send the real error code+message to the client. Cleared after sending.
   pendingError?: { code: ErrorMessage['code']; message: string };
+  // Set just before an EXECUTE_TOOL side-effect
+  pendingToolCall?: { name: string; args: string; id?: string };
 }

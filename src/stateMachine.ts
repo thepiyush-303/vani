@@ -116,7 +116,7 @@ export function transition(
         case 'llm_tool_call':
           return {
             nextState: ServerState.TOOL_EXECUTING,
-            sideEffects: ['SEND_FILLER_TTS'],
+            sideEffects: ['SEND_FILLER_TTS', 'EXECUTE_TOOL'],
           };
         case 'llm_stream_complete':
           return {

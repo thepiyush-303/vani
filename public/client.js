@@ -31,7 +31,7 @@ const VAD_CONFIG = {
   negativeSpeechThreshold:   0.35,  // silence threshold (unchanged — avoid clipping soft trailing speech)
   minSpeechFrames:           6,     // was 3 — require ~192ms of sustained speech; drops brief noise bursts
   preSpeechPadFrames:        5,     // 160ms pre-buffer (streaming onset handled by preBuffer, below)
-  redemptionFrames:          8,     // 256ms silence window before speech_end
+  redemptionFrames:          4,     // 128ms silence window before speech_end (reduced for speed)
 };
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -55,6 +55,7 @@ const dot          = document.getElementById('status-dot');
 const stateLabel   = document.getElementById('state-label');
 const vadMeter     = document.getElementById('vad-meter');
 const transcriptEl = document.getElementById('transcript');
+const aiResponseEl = document.getElementById('ai-response');
 const btnConnect   = document.getElementById('btn-connect');
 const btnDisconnect= document.getElementById('btn-disconnect');
 const logEl        = document.getElementById('log');
@@ -81,7 +82,100 @@ function log(msg, type = 'sys') {
 }
 
 function setTranscript(text, isFinal = false) {
-  transcriptEl.innerHTML = `<span class="${isFinal ? 'final' : 'partial'}">${text || '…'}</span>`;
+  if (!text) {
+    transcriptEl.innerHTML = '<span class="partial">…</span>';
+    return;
+  }
+  
+  if (isFinal) {
+    transcriptEl.innerHTML = '';
+    const span = document.createElement('span');
+    span.className = 'final';
+    span.textContent = text;
+    transcriptEl.appendChild(span);
+    return;
+  }
+
+  // Prevent re-animating words that were already present in previous partials
+  const existingWords = Array.from(transcriptEl.querySelectorAll('.word')).map(el => el.textContent.trim());
+  const newWords = text.trim().split(/\s+/).filter(Boolean);
+  
+  transcriptEl.innerHTML = '';
+  newWords.forEach((word, i) => {
+    const span = document.createElement('span');
+    span.className = 'word';
+    span.textContent = (i === 0 ? '' : ' ') + word;
+    
+    // Only animate if this word is NEW (index > existing length, or word changed)
+    if (i >= existingWords.length || word !== existingWords[i]) {
+      span.style.animationDelay = '0ms';
+    } else {
+      span.style.opacity = '1';
+      span.style.animation = 'none';
+      span.style.transform = 'none';
+    }
+    
+    transcriptEl.appendChild(span);
+  });
+}
+
+// ── AI Response Pacing ────────────────────────────────────────────────────────
+
+let aiCursor = null;  // the blinking cursor element
+let aiTokenQueue = [];
+let aiTokenPacer = null;
+
+function clearAiResponse() {
+  aiResponseEl.innerHTML = '';
+  aiCursor = null;
+  aiTokenQueue = [];
+  if (aiTokenPacer) {
+    clearInterval(aiTokenPacer);
+    aiTokenPacer = null;
+  }
+}
+
+function appendAiToken(token) {
+  aiTokenQueue.push(token);
+  if (!aiTokenPacer) {
+    // Pace tokens at ~40ms each so it looks natural even if Groq sends them in 1ms
+    aiTokenPacer = setInterval(() => {
+      const nextToken = aiTokenQueue.shift();
+      if (nextToken !== undefined) {
+        realAppendAiToken(nextToken);
+      } else {
+        clearInterval(aiTokenPacer);
+        aiTokenPacer = null;
+      }
+    }, 45); 
+  }
+}
+
+function realAppendAiToken(token) {
+  const placeholder = aiResponseEl.querySelector('.placeholder');
+  if (placeholder) placeholder.remove();
+
+  if (aiCursor && aiCursor.parentNode) aiCursor.remove();
+
+  const span = document.createElement('span');
+  span.className = 'ai-token';
+  span.textContent = token;
+  aiResponseEl.appendChild(span);
+
+  aiCursor = document.createElement('span');
+  aiCursor.className = 'ai-cursor';
+  aiResponseEl.appendChild(aiCursor);
+}
+
+function finalizeAiResponse() {
+  // Wait for the visual queue to finish draining before removing the cursor
+  const checkDone = setInterval(() => {
+    if (aiTokenQueue.length === 0) {
+      if (aiCursor && aiCursor.parentNode) aiCursor.remove();
+      aiCursor = null;
+      clearInterval(checkDone);
+    }
+  }, 100);
 }
 
 function setMeter(probability) {
@@ -228,10 +322,12 @@ function handleServerMessage(msg) {
     case 'transcript_final':
       setTranscript(msg.text, true);
       log(`✎ final: "${msg.text}" (${msg.duration_ms}ms)`, 'in');
+      // Clear AI box for fresh response
+      clearAiResponse();
       break;
 
     case 'llm_token':
-      // Accumulate: not shown in Phase 2 (Groq not wired yet)
+      appendAiToken(msg.delta);
       break;
 
     case 'tool_call':
@@ -244,6 +340,7 @@ function handleServerMessage(msg) {
 
     case 'turn_complete':
       log(`✓ turn_complete (${msg.total_latency_ms}ms, ${msg.token_count} tokens)`, 'in');
+      finalizeAiResponse();
       setUIState('IDLE');
       break;
 

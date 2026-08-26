@@ -10,6 +10,7 @@ import * as piperProcess from './piperProcess';
 import { SentenceBuffer } from './sentenceBuffer';
 import { startGroqStream, abortGroqStream } from './groqStream';
 import { setActiveSentenceBuffer } from './sharedState';
+import { executeWeatherTool } from './tools/weather';
 
 // ── Sentence buffer & internal event callback ─────────────────
 
@@ -120,6 +121,9 @@ export function dispatchSideEffects(
       case 'NOTIFY_CLIENT_ERROR':
         notifyClientError(ws, ctx);
         break;
+      case 'EXECUTE_TOOL':
+        executeTool(ws, ctx);
+        break;
       case 'NOOP':
         break;
     }
@@ -184,6 +188,49 @@ function killPiper(ws: WebSocket, ctx: SessionContext): void {
 function sendFillerTts(ws: WebSocket, ctx: SessionContext): void {
   console.log(`[${ctx.sessionId}] SEND_FILLER_TTS`);
   piperProcess.sendFillerPhrase(ws);
+}
+
+function executeTool(ws: WebSocket, ctx: SessionContext): void {
+  const tool = ctx.pendingToolCall;
+  if (!tool) {
+    console.warn(`[${ctx.sessionId}] EXECUTE_TOOL but no pendingToolCall found`);
+    return;
+  }
+  ctx.pendingToolCall = undefined;
+  
+  const emit = internalEventEmitter;
+  if (!emit) return;
+  
+  console.log(`[${ctx.sessionId}] EXECUTE_TOOL: ${tool.name}(${tool.args})`);
+  
+  // In a real app we'd dispatch to a registry. Here we just hardcode weather.
+  if (tool.name === 'get_weather') {
+    executeWeatherTool(tool.args).then(result => {
+        // Append result to history
+        ctx.conversationHistory.push({
+            role: 'tool',
+            content: result,
+            tool_call_id: tool.id,
+        });
+        emit('tool_result_ready');
+    }).catch(err => {
+        console.error(`[${ctx.sessionId}] Tool execution failed:`, err);
+        ctx.conversationHistory.push({
+            role: 'tool',
+            content: JSON.stringify({ error: "Tool execution failed locally" }),
+            tool_call_id: tool.id,
+        });
+        emit('tool_result_ready');
+    });
+  } else {
+    // Unrecognized tool
+    ctx.conversationHistory.push({
+        role: 'tool',
+        content: JSON.stringify({ error: `Tool ${tool.name} is not implemented` }),
+        tool_call_id: tool.id,
+    });
+    emit('tool_result_ready');
+  }
 }
 
 // ── Groq LLM side-effects ─────────────────────────────────────

@@ -244,10 +244,21 @@ export function handleInternalEvent(
     }
 
     case 'llm_tool_call': {
-      // Transition LLM_STREAMING → TOOL_EXECUTING; SEND_FILLER_TTS plays "One moment..."
-      // Tool execution logic wired in Phase 5
+      const name = p?.name as string | undefined;
+      const args = p?.args as string | undefined;
+      const id = p?.id as string | undefined;
+      if (name && id) {
+        ctx.pendingToolCall = { name, args: args || '{}', id };
+      }
       runTransition(ws, ctx, 'llm_tool_call');
-      console.log(`[${ctx.sessionId}] llm_tool_call: ${String(p?.name)} (Phase 5 stub)`);
+      console.log(`[${ctx.sessionId}] llm_tool_call: ${String(p?.name)}`);
+      break;
+    }
+
+    case 'tool_result_ready': {
+      // The backend tool execution finished and history was updated. 
+      // State machine transitioning TOOL_EXECUTING -> LLM_STREAMING will call START_GROQ_STREAM.
+      runTransition(ws, ctx, 'tool_result_ready');
       break;
     }
 

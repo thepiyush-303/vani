@@ -4,12 +4,14 @@
 // to Piper so we don't start synthesis mid-sentence.
 // ============================================================
 
-// Regex matches sentence-ending punctuation followed by whitespace or end-of-string.
-// Also treats newlines as natural boundaries.
-const SENTENCE_END_RE = /[.?!]+\s+|[.?!]+$|\n/;
+// Regex matches sentence-ending or phrase-ending punctuation followed by whitespace or end-of-string.
+// Also treats newlines as natural boundaries. We use commas and semicolons to stream chunks
+// faster to TTS for lower latency audio onset.
+const SENTENCE_END_RE = /[,.?!;:]+\s+|[,.?!;:]+$|\n/;
 
-// Maximum ms to wait before flushing an incomplete fragment anyway.
-const FLUSH_TIMEOUT_MS = 200;
+// Maximum ms to wait before flushing an incomplete fragment anyway. 
+// We lowered this to force Piper to start synthesizing if the LLM emits a long phrase without punctuation.
+const FLUSH_TIMEOUT_MS = 150;
 
 export type SentenceCallback = (sentence: string) => void;
 
@@ -33,13 +35,7 @@ export class SentenceBuffer {
    * Schedules a timeout flush for any remaining fragment.
    */
   private tryFlush(): void {
-    // Reset timeout on each new token — we start it fresh
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
-
-    // Keep extracting from the front of the buffer while a sentence boundary exists
+    // Keep extracting from the front of the buffer while a sentence/phrase boundary exists
     let match: RegExpExecArray | null;
     while ((match = SENTENCE_END_RE.exec(this.buffer)) !== null) {
       const endIdx = match.index + match[0].length;
@@ -51,8 +47,10 @@ export class SentenceBuffer {
       }
     }
 
-    // If there's still content in the buffer, schedule a forced flush
-    if (this.buffer.trim().length > 0) {
+    // If there's still content in the buffer and NO timer is running, start one.
+    // We DO NOT clear the timer on every token anymore, otherwise a fast LLM token flood
+    // without punctuation would wait indefinitely for the stream to end!
+    if (this.buffer.trim().length > 0 && !this.flushTimer) {
       this.flushTimer = setTimeout(() => {
         const remaining = this.buffer.trim();
         if (remaining.length > 0) {

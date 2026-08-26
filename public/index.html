@@ -16,6 +16,7 @@
       --success: #3ddc97;
       --warn: #f5a623;
       --danger: #ff5f57;
+      --ai-color: #a78bfa;
       --radius: 12px;
     }
 
@@ -36,10 +37,10 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 2rem;
-      width: 420px;
+      width: 480px;
       display: flex;
       flex-direction: column;
-      gap: 1.5rem;
+      gap: 1.25rem;
       box-shadow: 0 8px 40px rgba(0,0,0,0.5);
     }
 
@@ -52,7 +53,6 @@
 
     h1 span { color: var(--accent); }
 
-    /* ── Status pill ── */
     .status-row {
       display: flex;
       align-items: center;
@@ -69,55 +69,42 @@
       transition: background 0.25s;
     }
 
-    .dot.idle     { background: var(--muted); }
+    .dot.idle      { background: var(--muted); }
     .dot.listening { background: var(--success); box-shadow: 0 0 6px var(--success); animation: pulse 1s infinite; }
-    .dot.active   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .dot.error    { background: var(--danger); }
+    .dot.active    { background: var(--accent);  box-shadow: 0 0 6px var(--accent); }
+    .dot.error     { background: var(--danger); }
 
-    @keyframes pulse {
-      0%,100% { opacity:1; } 50% { opacity:0.4; }
-    }
+    @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
 
     #state-label { font-weight: 500; color: var(--text); }
 
-    /* ── Meter ── */
-    .meter-wrap {
-      display: flex;
-      flex-direction: column;
-      gap: 0.4rem;
-    }
-
-    .meter-label {
-      font-size: 0.75rem;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-    }
-
-    .meter-bar {
-      height: 6px;
-      background: var(--border);
-      border-radius: 3px;
-      overflow: hidden;
-    }
-
+    .meter-wrap { display: flex; flex-direction: column; gap: 0.4rem; }
+    .meter-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+    .meter-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
     .meter-fill {
-      height: 100%;
-      width: 0%;
+      height: 100%; width: 0%;
       background: linear-gradient(90deg, var(--accent-dim), var(--accent));
       border-radius: 3px;
       transition: width 0.06s ease-out;
     }
 
-    /* ── Transcript ── */
+    /* ── Conversation boxes ── */
+    .box-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.35rem;
+    }
+
     .transcript-box {
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 0.8rem 1rem;
       font-size: 0.9rem;
-      min-height: 70px;
-      line-height: 1.6;
+      min-height: 58px;
+      line-height: 1.65;
       color: var(--muted);
       word-break: break-word;
     }
@@ -125,42 +112,66 @@
     .transcript-box .partial { color: var(--muted); font-style: italic; }
     .transcript-box .final   { color: var(--text); }
 
-    /* ── Buttons ── */
-    .btn-row { display: flex; gap: 0.75rem; }
+    /* Word-by-word user speech pop-in */
+    .word {
+      display: inline;
+      opacity: 0;
+      animation: wordIn 0.15s ease-out forwards;
+    }
+    @keyframes wordIn { from { opacity:0; transform: translateY(3px); } to { opacity:1; transform: none; } }
 
-    button {
-      flex: 1;
-      padding: 0.65rem 1rem;
+    /* ── AI response box ── */
+    .ai-box {
+      background: #13121f;
+      border: 1px solid var(--accent-dim);
       border-radius: 8px;
-      border: none;
-      font-size: 0.88rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: opacity 0.15s, transform 0.1s;
+      padding: 0.8rem 1rem;
+      font-size: 0.9rem;
+      min-height: 58px;
+      line-height: 1.65;
+      color: var(--ai-color);
+      word-break: break-word;
     }
 
+    .ai-box .placeholder { color: var(--muted); font-style: italic; }
+
+    /* token fade-in */
+    .ai-token { display: inline; opacity: 0; animation: tokIn 0.1s ease-out forwards; }
+    @keyframes tokIn { from { opacity:0; } to { opacity:1; } }
+
+    /* blinking cursor while streaming */
+    .ai-cursor {
+      display: inline-block;
+      width: 2px; height: 1em;
+      background: var(--ai-color);
+      margin-left: 2px;
+      vertical-align: middle;
+      animation: blink 0.7s steps(1) infinite;
+    }
+    @keyframes blink { 0%,100% { opacity:1; } 50% { opacity:0; } }
+
+    /* ── Buttons ── */
+    .btn-row { display: flex; gap: 0.75rem; }
+    button {
+      flex: 1; padding: 0.65rem 1rem;
+      border-radius: 8px; border: none;
+      font-size: 0.88rem; font-weight: 600;
+      cursor: pointer; transition: opacity 0.15s, transform 0.1s;
+    }
     button:active { transform: scale(0.97); }
     button:disabled { opacity: 0.35; cursor: not-allowed; }
-
     #btn-connect    { background: var(--accent); color: #fff; }
     #btn-disconnect { background: var(--border); color: var(--text); }
 
     /* ── Log ── */
     .log {
-      font-size: 0.75rem;
-      color: var(--muted);
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.6rem 0.8rem;
-      height: 120px;
-      overflow-y: auto;
+      font-size: 0.75rem; color: var(--muted);
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.6rem 0.8rem;
+      height: 110px; overflow-y: auto;
       font-family: 'SF Mono', 'Fira Code', monospace;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
+      display: flex; flex-direction: column; gap: 2px;
     }
-
     .log .entry { line-height: 1.4; }
     .log .entry.in  { color: var(--success); }
     .log .entry.out { color: var(--accent); }
@@ -182,8 +193,18 @@
       <div class="meter-bar"><div class="meter-fill" id="vad-meter"></div></div>
     </div>
 
-    <div class="transcript-box" id="transcript">
-      <span class="partial">Waiting for speech…</span>
+    <div>
+      <div class="box-label">🎤 You</div>
+      <div class="transcript-box" id="transcript">
+        <span class="partial">Waiting for speech…</span>
+      </div>
+    </div>
+
+    <div>
+      <div class="box-label">🤖 Assistant</div>
+      <div class="ai-box" id="ai-response">
+        <span class="placeholder">Response will appear here…</span>
+      </div>
     </div>
 
     <div class="btn-row">
@@ -194,16 +215,8 @@
     <div class="log" id="log"></div>
   </div>
 
-  <!--
-    Locally hosted ONNX Runtime + Silero VAD to avoid CDN CORS/MIME errors.
-    Assets live in public/vad/ (downloaded from jsdelivr).
-  -->
   <script src="/vad/ort.min.js"></script>
   <script>
-    // Configure ORT BEFORE the VAD bundle loads and creates sessions.
-    // 1. Point WASM path to our local /vad/ directory
-    // 2. Disable multi-threading (requires COOP/COEP headers we don't serve)
-    // 3. Disable proxy worker (avoids dynamic import() CORS issues)
     ort.env.wasm.wasmPaths = '/vad/';
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.proxy = false;
