@@ -6,3 +6,4 @@ PROGRESS.md
 run-smoke.sh
 codebase_walkthrough.md
 venv
+dist
