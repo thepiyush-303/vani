@@ -171,6 +171,13 @@ export function handleInternalEvent(
       const text        = (p?.text as string) ?? '';
       const duration_ms = (p?.duration_ms as number) ?? 0;
 
+      // Empty transcript (noise / barge-in silence) — reset to IDLE, skip Groq.
+      if (!text.trim()) {
+        console.log(`[${ctx.sessionId}] Empty whisper transcript — resetting to IDLE`);
+        runTransition(ws, ctx, 'whisper_error'); // reuse error path (goes back to IDLE)
+        break;
+      }
+
       // 1. Send transcript_final to browser
       const msg: ServerMessage = {
         type: 'transcript_final',
@@ -186,7 +193,6 @@ export function handleInternalEvent(
       ctx.conversationHistory.push({ role: 'user', content: text });
 
       // 3. Transition TRANSCRIBING → LLM_STREAMING
-      // START_GROQ_STREAM side-effect will call triggerGroqStream() in sideEffects.ts
       runTransition(ws, ctx, 'whisper_final');
       break;
     }

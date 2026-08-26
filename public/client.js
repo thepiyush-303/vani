@@ -27,10 +27,10 @@ const SESSION_ID  = crypto.randomUUID();
 
 const VAD_CONFIG = {
   frameSamples:              512,   // must match 16kHz frame size
-  positiveSpeechThreshold:   0.50,
-  negativeSpeechThreshold:   0.35,
-  minSpeechFrames:           3,     // 96ms of speech before trigger
-  preSpeechPadFrames:        5,     // 160ms pre-buffer
+  positiveSpeechThreshold:   0.60,  // was 0.50 — higher onset confidence; rejects noise/transients
+  negativeSpeechThreshold:   0.35,  // silence threshold (unchanged — avoid clipping soft trailing speech)
+  minSpeechFrames:           6,     // was 3 — require ~192ms of sustained speech; drops brief noise bursts
+  preSpeechPadFrames:        5,     // 160ms pre-buffer (streaming onset handled by preBuffer, below)
   redemptionFrames:          8,     // 256ms silence window before speech_end
 };
 
@@ -41,6 +41,13 @@ let vad           = null;          // MicVAD instance
 let isSpeaking    = false;         // true while VAD reports active speech
 let serverState   = 'DISCONNECTED';
 let speechStartTs = 0;             // epoch ms when current utterance started
+
+// Rolling pre-buffer of recent mic frames captured while idle. Because minSpeechFrames
+// is raised for noise rejection, the VAD only fires speech_start after ~192ms of
+// confirmed speech; we flush this buffer at speech_start so the onset (the first word,
+// spoken just before the trigger) isn't clipped from what the STT actually receives.
+let preBuffer = [];
+const PRE_BUFFER_FRAMES = 16;      // ~512ms of pre-roll at 32ms/frame
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
@@ -139,8 +146,18 @@ function markAssistantSpeaking() {
   unmuteTimer = setTimeout(() => {
     assistantSpeaking = false;
     unmuteTimer = null;
+    preBuffer = [];
     log('🎙 mic live (assistant finished speaking)', 'sys');
   }, remainingMs);
+}
+
+// True whenever the mic must be ignored: while the assistant's audio is playing
+// (assistantSpeaking) OR any time the server is mid-turn (TRANSCRIBING, LLM_STREAMING,
+// TTS_STREAMING, etc.). The mic is live ONLY when idle or actively listening to the
+// user. This is full half-duplex: background noise during the assistant's turn can no
+// longer trigger a false new turn or a false barge-in. (Real barge-in is Phase 6.)
+function micGated() {
+  return assistantSpeaking || (serverState !== 'IDLE' && serverState !== 'LISTENING');
 }
 
 function getPlaybackCtx() {
@@ -260,6 +277,16 @@ async function initVAD() {
 
   vad = await window.vad.MicVAD.new({
     ...VAD_CONFIG,
+    // Browser-level DSP applied at getUserMedia, before the VAD or STT ever see the
+    // audio. noiseSuppression is the big lever for continuous fan/room/crowd noise;
+    // echoCancellation additionally suppresses any residual of the assistant's own
+    // playback; autoGainControl normalizes mic level so soft speech still clears the
+    // threshold. These stack with the client-side half-duplex gating below.
+    additionalAudioConstraints: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl:  true,
+    },
     modelURL:         '/vad/silero_vad.onnx',
     onnxWASMBasePath: '/vad/',
     ortConfig: (ort) => {
@@ -270,10 +297,15 @@ async function initVAD() {
 
     // PRD §2.2 onSpeechStart: send speech_start + begin PCM streaming
     onSpeechStart() {
-      if (assistantSpeaking) return;   // half-duplex: ignore the mic while the assistant is speaking
+      if (micGated()) return;   // half-duplex: only start a turn when idle/listening
       isSpeaking    = true;
       speechStartTs = Date.now();
       sendJson({ type: 'speech_start', session_id: SESSION_ID, timestamp_ms: speechStartTs });
+      // Flush the pre-roll so the onset (buffered before the VAD trigger) isn't clipped.
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        for (const f of preBuffer) sendBinary(float32ToInt16(f));
+      }
+      preBuffer = [];
       setMeter(1.0);
       log('🎤 speech_start', 'out');
     },
@@ -282,17 +314,21 @@ async function initVAD() {
     // frame.audio is Float32Array at 16kHz (FRAME_SIZE = 512 samples)
     onFrameProcessed(probabilities, frame) {
       setMeter(probabilities.isSpeech);
-      if (assistantSpeaking) return;   // never stream our own audio back to the server
+      if (micGated()) return;   // ignore the mic during the assistant's turn / playback
 
-      if (isSpeaking && ws && ws.readyState === WebSocket.OPEN) {
-        const int16 = float32ToInt16(frame);
-        sendBinary(int16);
+      if (isSpeaking) {
+        if (ws && ws.readyState === WebSocket.OPEN) sendBinary(float32ToInt16(frame));
+      } else {
+        // Not speaking yet — keep a short rolling pre-roll so the onset isn't lost
+        // when the (raised) minSpeechFrames threshold finally fires speech_start.
+        preBuffer.push(frame);
+        if (preBuffer.length > PRE_BUFFER_FRAMES) preBuffer.shift();
       }
     },
 
     // PRD §2.2 onSpeechEnd: send speech_end + stop PCM streaming
     onSpeechEnd() {
-      if (assistantSpeaking || !isSpeaking) return;   // only end a turn we actually started
+      if (micGated() || !isSpeaking) return;   // only end a turn we actually started
       const duration = Date.now() - speechStartTs;
       isSpeaking = false;
       setMeter(0);
@@ -302,8 +338,9 @@ async function initVAD() {
 
     // PRD §2.2 onVADMisfire: discard, server resets to IDLE
     onVADMisfire() {
-      if (assistantSpeaking) return;   // echo during playback — ignore
+      if (micGated()) return;   // noise/echo during the assistant's turn — ignore
       isSpeaking = false;
+      preBuffer = [];
       setMeter(0);
       sendJson({ type: 'vad_misfire', session_id: SESSION_ID, timestamp_ms: Date.now() });
       log('↩ vad_misfire', 'out');
@@ -381,6 +418,7 @@ function disconnect() {
 function cleanup() {
   isSpeaking = false;
   assistantSpeaking = false;
+  preBuffer = [];
   if (unmuteTimer) { clearTimeout(unmuteTimer); unmuteTimer = null; }
   setMeter(0);
   setUIState('DISCONNECTED');

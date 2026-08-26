@@ -101,8 +101,10 @@ describe('TRANSCRIBING state', () => {
     expectTransition(ServerState.TRANSCRIBING, 'whisper_error', ServerState.IDLE, 'NOTIFY_CLIENT_ERROR');
   });
 
-  it('speech_start in TRANSCRIBING → INVALID_STATE', () => {
-    expectInvalidTransition(ServerState.TRANSCRIBING, 'speech_start');
+  it('speech_start in TRANSCRIBING → TRANSCRIBING (ignore stray VAD while Whisper works)', () => {
+    // Half-duplex: VAD events can arrive during transcription; they are ignored
+    // (NOOP) rather than raising INVALID_STATE. See stateMachine TRANSCRIBING case.
+    expectTransition(ServerState.TRANSCRIBING, 'speech_start', ServerState.TRANSCRIBING, 'NOOP');
   });
 });
 
@@ -143,13 +145,11 @@ describe('TTS_STREAMING state', () => {
     expectTransition(ServerState.TTS_STREAMING, 'llm_stream_complete', ServerState.IDLE, 'SEND_TURN_COMPLETE');
   });
 
-  it('speech_start (barge-in) → BARGE_IN_INTERRUPTED, kills Piper', () => {
-    const result = transition(ServerState.TTS_STREAMING, 'speech_start');
-    expect(isTransitionError(result)).toBe(false);
-    if (!isTransitionError(result)) {
-      expect(result.nextState).toBe(ServerState.BARGE_IN_INTERRUPTED);
-      expect(result.sideEffects).toContain('KILL_PIPER');
-    }
+  it('speech_start → TTS_STREAMING (half-duplex: VAD fires on our own playback; no barge-in)', () => {
+    // Server-side barge-in during playback was removed for half-duplex operation:
+    // the mic hears the assistant's own TTS, so speech_start here is self-echo, not
+    // the user. It is ignored (NOOP). Real barge-in is deferred to Phase 6.
+    expectTransition(ServerState.TTS_STREAMING, 'speech_start', ServerState.TTS_STREAMING, 'NOOP');
   });
 });
 
@@ -176,8 +176,8 @@ describe('BARGE_IN_INTERRUPTED state', () => {
     expectTransition(ServerState.BARGE_IN_INTERRUPTED, 'speech_start', ServerState.LISTENING, 'OPEN_WHISPER_PIPE');
   });
 
-  it('vad_misfire → IDLE', () => {
-    expectTransition(ServerState.BARGE_IN_INTERRUPTED, 'vad_misfire', ServerState.IDLE, 'NOOP');
+  it('vad_misfire → BARGE_IN_INTERRUPTED (ignore stale VAD event after barge-in)', () => {
+    expectTransition(ServerState.BARGE_IN_INTERRUPTED, 'vad_misfire', ServerState.BARGE_IN_INTERRUPTED, 'NOOP');
   });
 
   it('whisper_final in BARGE_IN_INTERRUPTED → INVALID_STATE', () => {

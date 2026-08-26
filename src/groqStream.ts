@@ -13,11 +13,11 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY ?? '',
 });
 
-const GROQ_MODEL        = process.env.GROQ_MODEL ?? 'openai/gpt-oss-20b';
-const MAX_TOKENS        = 512;   // Cap only — the system prompt drives brevity; leaves room for a genuinely long answer
-const TEMPERATURE       = 0.7;
-const MAX_RETRIES       = 2;     // Retry once on 429 rate-limit
-const RETRY_DELAY_MS    = 1000;
+const GROQ_MODEL = process.env.GROQ_MODEL ?? 'llama-3.3-70b-versatile';
+const MAX_TOKENS = 512;   // Cap only — the system prompt drives brevity; leaves room for a genuinely long answer
+const TEMPERATURE = 0.7;
+const MAX_RETRIES = 2;     // Retry once on 429 rate-limit
+const RETRY_DELAY_MS = 1000;
 
 // gpt-oss models "think" before answering; the model default can spend several
 // seconds reasoning, which blows the voice latency budget. 'low' keeps a little
@@ -25,6 +25,13 @@ const RETRY_DELAY_MS    = 1000;
 // set this to 'none' (no reasoning). Options: 'none' | 'low' | 'medium' | 'high'.
 // Only meaningful for gpt-oss / reasoning models.
 const REASONING_EFFORT: 'none' | 'low' | 'medium' | 'high' = 'low';
+
+// reasoning_effort is only valid for reasoning models (gpt-oss, qwen-qwq,
+// deepseek-r1, o1/o3). Standard instruct models like llama-3.3-70b reject the
+// parameter, so we only send it when the active model actually supports it.
+function isReasoningModel(model: string): boolean {
+  return /gpt-oss|qwq|deepseek-r1|o[13]/i.test(model);
+}
 
 // ── System prompt ─────────────────────────────────────────────
 
@@ -50,10 +57,10 @@ export function abortGroqStream(): void {
 
 export type GroqEventCallback = (
   event:
-    | { type: 'llm_token';           delta: string; tokenIndex: number }
-    | { type: 'llm_tool_call';       name: string; args: string }
+    | { type: 'llm_token'; delta: string; tokenIndex: number }
+    | { type: 'llm_tool_call'; name: string; args: string }
     | { type: 'llm_stream_complete'; fullText: string }
-    | { type: 'llm_error';           code: string; msg: string }
+    | { type: 'llm_error'; code: string; msg: string }
 ) => void;
 
 /**
@@ -137,12 +144,12 @@ async function streamCompletion(
       stream: true,
       max_tokens: MAX_TOKENS,
       temperature: TEMPERATURE,
-      reasoning_effort: REASONING_EFFORT,
+      ...(isReasoningModel(GROQ_MODEL) ? { reasoning_effort: REASONING_EFFORT } : {}),
     },
     { signal },
   );
 
-  let fullText   = '';
+  let fullText = '';
   let tokenIndex = 0;
 
   for await (const chunk of stream) {
@@ -151,13 +158,13 @@ async function streamCompletion(
     const choice = chunk.choices[0];
     if (!choice) continue;
 
-    const delta       = choice.delta;
+    const delta = choice.delta;
     const finishReason = choice.finish_reason;
 
     // ── Text delta ────────────────────────────────────────────
     if (delta?.content) {
       const text = delta.content;
-      fullText  += text;
+      fullText += text;
       ctx.tokenCount++;
 
       onEvent({ type: 'llm_token', delta: text, tokenIndex });

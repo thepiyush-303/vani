@@ -1,0 +1,1 @@
+{"version":3,"file":"sharedState.js","sourceRoot":"","sources":["../src/sharedState.ts"],"names":[],"mappings":";AAAA,+DAA+D;AAC/D,gEAAgE;AAChE,oEAAoE;AACpE,+DAA+D;;AAW/D,0DAEC;AAED,0DAEC;AAbD;;;;GAIG;AACH,IAAI,qBAAqB,GAA0B,IAAI,CAAC;AAExD,SAAgB,uBAAuB;IACrC,OAAO,qBAAqB,CAAC;AAC/B,CAAC;AAED,SAAgB,uBAAuB,CAAC,GAA0B;IAChE,qBAAqB,GAAG,GAAG,CAAC;AAC9B,CAAC"}

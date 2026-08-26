@@ -83,7 +83,7 @@ export function transition(
           // Emit transcript_partial to client, trigger pre-fetch
           return {
             nextState: ServerState.TRANSCRIBING,
-            sideEffects: ['NOOP'], // pre-fetch logic added in Phase 3
+            sideEffects: ['NOOP'],
           };
         case 'whisper_final':
           return {
@@ -95,6 +95,11 @@ export function transition(
             nextState: ServerState.IDLE,
             sideEffects: ['NOTIFY_CLIENT_ERROR'],
           };
+        // VAD events can arrive while Whisper is working; silently ignore them.
+        case 'speech_start':
+        case 'speech_end':
+        case 'vad_misfire':
+          return { nextState: ServerState.TRANSCRIBING, sideEffects: ['NOOP'] };
         default:
           return invalidTransition(currentState, event);
       }
@@ -150,18 +155,17 @@ export function transition(
             nextState: ServerState.IDLE,
             sideEffects: ['SEND_TURN_COMPLETE'],
           };
-        case 'speech_start':
-          // Barge-in while playing audio
-          return {
-            nextState: ServerState.BARGE_IN_INTERRUPTED,
-            sideEffects: ['KILL_PIPER', 'ABORT_GROQ_STREAM'],
-          };
         case 'llm_error':
           // Groq stream failed mid-response — stop TTS playback and reset.
           return {
             nextState: ServerState.IDLE,
             sideEffects: ['ABORT_GROQ_STREAM', 'KILL_PIPER', 'NOTIFY_CLIENT_ERROR'],
           };
+        // VAD fires on TTS playback audio; ignore to avoid barge-in false positives.
+        case 'speech_start':
+        case 'speech_end':
+        case 'vad_misfire':
+          return { nextState: ServerState.TTS_STREAMING, sideEffects: ['NOOP'] };
         default:
           return invalidTransition(currentState, event);
       }
@@ -201,10 +205,9 @@ export function transition(
             sideEffects: ['OPEN_WHISPER_PIPE'],
           };
         case 'vad_misfire':
-          return {
-            nextState: ServerState.IDLE,
-            sideEffects: ['NOOP'],
-          };
+        case 'speech_end':
+          // Ignore stale events that arrive after barge-in
+          return { nextState: ServerState.BARGE_IN_INTERRUPTED, sideEffects: ['NOOP'] };
         default:
           return invalidTransition(currentState, event);
       }
