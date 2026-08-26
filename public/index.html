@@ -195,11 +195,20 @@
   </div>
 
   <!--
-    @ricky0123/vad-web bundles ONNX Runtime WASM + Silero model.
-    ort-wasm-simd-threaded.wasm is served from the same CDN via import map.
+    Locally hosted ONNX Runtime + Silero VAD to avoid CDN CORS/MIME errors.
+    Assets live in public/vad/ (downloaded from jsdelivr).
   -->
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.0/dist/ort.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.22/dist/bundle.min.js"></script>
+  <script src="/vad/ort.min.js"></script>
+  <script>
+    // Configure ORT BEFORE the VAD bundle loads and creates sessions.
+    // 1. Point WASM path to our local /vad/ directory
+    // 2. Disable multi-threading (requires COOP/COEP headers we don't serve)
+    // 3. Disable proxy worker (avoids dynamic import() CORS issues)
+    ort.env.wasm.wasmPaths = '/vad/';
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
+  </script>
+  <script src="/vad/bundle.min.js"></script>
   <script src="client.js"></script>
 </body>
 </html>

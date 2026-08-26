@@ -74,43 +74,41 @@ def read_stdin_loop():
         # Read exactly 4 bytes for the frame length header
         header = stdin_bin.read(4)
         if len(header) < 4:
-            # stdin closed (Node.js process exited) — clean shutdown
-            log_err("stdin closed — exiting.")
+            log_err(f"stdin closed — exiting. (Got {len(header)} bytes)")
             break
 
         byte_count = struct.unpack("<I", header)[0]
+        # log_err(f"Read header: byte_count={byte_count}")
 
         if byte_count == 0:
-            # ── End-of-utterance sentinel ─────────────────────────────────────
+            log_err(f"Received EOF sentinel. Buffered chunks: {len(audio_chunks)}")
             if not audio_chunks:
                 log_err("Received EOF sentinel but no audio buffered — ignoring.")
                 continue
 
-            # Concatenate all int16 PCM chunks
             raw_pcm = b"".join(audio_chunks)
             audio_chunks = []
-
-            # Convert int16 PCM → float32 normalized to [-1, 1]
+            
+            log_err(f"Starting transcribe on {len(raw_pcm)} bytes PCM...")
             int16_array = np.frombuffer(raw_pcm, dtype=np.int16)
             float32_audio = int16_array.astype(np.float32) / 32768.0
 
             utterance_start = time.time()
             transcribe(float32_audio, utterance_start)
+            log_err("Finished transcribe function")
 
         else:
-            # ── Audio data frame ───────────────────────────────────────────────
             pcm_bytes = stdin_bin.read(byte_count)
             if len(pcm_bytes) < byte_count:
                 log_err(f"Truncated frame: expected {byte_count} bytes, got {len(pcm_bytes)}")
                 break
             audio_chunks.append(pcm_bytes)
 
-            # Emit a partial after every ~20 frames (~640ms) to reduce latency
-            # (Real partial streaming would require streaming=True and chunked decode)
             if len(audio_chunks) % 20 == 0:
+                # log_err(f"Buffered {len(audio_chunks)} frames...")
                 emit({
                     "type": "partial",
-                    "text": "...",  # Placeholder — real partials need streaming decode
+                    "text": "...",
                     "ts": time.time(),
                 })
 

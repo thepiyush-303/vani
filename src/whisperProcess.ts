@@ -16,10 +16,6 @@ export type WhisperTranscriptEvent =
 
 export type WhisperTranscriptCallback = (event: WhisperTranscriptEvent) => void;
 
-// ── Config ────────────────────────────────────────────────────
-
-const PYTHON  = process.env.PYTHON_BIN ?? 'python3';
-const SCRIPT  = path.join(process.cwd(), 'faster_whisper_server.py');
 const RESTART_DELAY_MS = 500;
 
 // ── Singleton state ───────────────────────────────────────────
@@ -102,6 +98,9 @@ export function stop(): void {
 
 function spawnWhisper(): void {
   isStarted = true;
+  const PYTHON = process.env.PYTHON_BIN ?? 'python3';
+  const SCRIPT = path.join(process.cwd(), 'faster_whisper_server.py');
+
   console.log(`[whisper] Spawning subprocess: ${PYTHON} ${SCRIPT}`);
 
   proc = spawn(PYTHON, [SCRIPT], {

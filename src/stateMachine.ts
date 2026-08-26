@@ -54,10 +54,13 @@ export function transition(
     case ServerState.LISTENING:
       switch (event) {
         case 'pcm_binary':
-          // Forward PCM chunk to Whisper — state unchanged
+          // Frame is already buffered in ctx.audioBuffer by handleBinaryMessage.
+          // Must NOT re-open the whisper pipe here: OPEN_WHISPER_PIPE clears
+          // ctx.audioBuffer, which would wipe the buffered utterance on every
+          // frame and leave Whisper with nothing to transcribe at speech_end.
           return {
             nextState: ServerState.LISTENING,
-            sideEffects: ['OPEN_WHISPER_PIPE'], // stub: represents "forward to whisper stdin"
+            sideEffects: ['NOOP'],
           };
         case 'speech_end':
           return {

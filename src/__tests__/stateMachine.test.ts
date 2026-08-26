@@ -63,6 +63,16 @@ describe('LISTENING state', () => {
     expectTransition(ServerState.LISTENING, 'pcm_binary', ServerState.LISTENING);
   });
 
+  it('pcm_binary must NOT re-open the whisper pipe (would clear the audio buffer)', () => {
+    const result = transition(ServerState.LISTENING, 'pcm_binary');
+    expect(isTransitionError(result)).toBe(false);
+    if (!isTransitionError(result)) {
+      // OPEN_WHISPER_PIPE clears ctx.audioBuffer; firing it per-frame wipes the
+      // buffered utterance and leaves Whisper nothing to transcribe at speech_end.
+      expect(result.sideEffects).not.toContain('OPEN_WHISPER_PIPE');
+    }
+  });
+
   it('speech_end → TRANSCRIBING, sends EOF to whisper', () => {
     expectTransition(ServerState.LISTENING, 'speech_end', ServerState.TRANSCRIBING, 'SEND_EOF_TO_WHISPER');
   });

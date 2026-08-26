@@ -3,21 +3,18 @@
 // WS on PORT (default 8765), HTTP on HTTP_PORT (default 3000)
 // ============================================================
 
+import 'dotenv/config';
 import { WebSocketServer, WebSocket } from 'ws';
 import { v4 as uuidv4 } from 'uuid';
 import * as http from 'http';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as dotenv from 'dotenv';
 import { SessionInitMessage, ServerMessage } from './types';
 import { createSession, SessionStore } from './session';
 import { handleTextMessage, handleBinaryMessage, handleInternalEvent } from './messageHandler';
 import { initSubprocesses } from './sideEffects';
 import * as whisperProcess from './whisperProcess';
 import * as piperProcess from './piperProcess';
-
-dotenv.config();
-
 
 const PORT = parseInt(process.env.PORT ?? '8765', 10);
 const HTTP_PORT = parseInt(process.env.HTTP_PORT ?? '3000', 10);
@@ -33,6 +30,8 @@ const MIME_TYPES: Record<string, string> = {
   '.js':   'application/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.ico':  'image/x-icon',
+  '.wasm': 'application/wasm',
+  '.onnx': 'application/octet-stream',
 };
 
 const httpServer = http.createServer((req, res) => {

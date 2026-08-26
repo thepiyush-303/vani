@@ -232,6 +232,13 @@ async function initVAD() {
 
   vad = await window.vad.MicVAD.new({
     ...VAD_CONFIG,
+    modelURL:         '/vad/silero_vad.onnx',
+    onnxWASMBasePath: '/vad/',
+    ortConfig: (ort) => {
+      ort.env.wasm.wasmPaths = '/vad/';
+      ort.env.wasm.numThreads = 1;
+      ort.env.wasm.proxy = false;
+    },
 
     // PRD §2.2 onSpeechStart: send speech_start + begin PCM streaming
     onSpeechStart() {
