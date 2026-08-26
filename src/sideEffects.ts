@@ -210,12 +210,12 @@ function triggerGroqStream(ctx: SessionContext): void {
         break;
       case 'llm_error':
         console.error(`[groq] Error ${ev.code}: ${ev.msg}`);
-        emit('whisper_error', { code: ev.code, msg: ev.msg }); // reuse error path to reset to IDLE
+        emit('llm_error', { code: ev.code, msg: ev.msg }); // reset to IDLE + surface real error
         break;
     }
   }).catch((err) => {
     console.error(`[groq] Unhandled stream error: ${err}`);
-    emit('whisper_error', { code: 'GROQ_FATAL', msg: String(err) });
+    emit('llm_error', { code: 'GROQ_FATAL', msg: String(err) });
   });
 
   console.log(`[${ctx.sessionId}] START_GROQ_STREAM — Groq stream initiated`);
@@ -244,23 +244,31 @@ function sendTurnComplete(ws: WebSocket, ctx: SessionContext): void {
   sendJson(ws, msg);
   ctx.turnStartedAt = null;
   ctx.tokenCount    = 0;
-  piperProcess.kill();       // Drain Piper after turn completes
+  // Do NOT kill Piper here. It is a persistent --json-input daemon that is
+  // still synthesizing the sentences we just queued; SIGTERM would cut the
+  // audio before any PCM is produced (the turn "completes" the instant the LLM
+  // stream ends, long before TTS playback finishes). Piper is only terminated
+  // on barge-in (KILL_PIPER) or server shutdown (stop()); between turns it idles.
   resetSentenceBuffer();
   setActiveSentenceBuffer(null);  // clear messageHandler reference
   console.log(`[${ctx.sessionId}] turn_complete (latency=${latency}ms)`);
 }
 
 function notifyClientError(ws: WebSocket, ctx: SessionContext): void {
+  // If a specific error was stashed (e.g. an LLM/Groq failure), surface the
+  // real code+message; otherwise default to the STT failure message.
+  const pending = ctx.pendingError;
   const msg: ServerMessage = {
     type: 'error',
     session_id: ctx.sessionId,
-    code: 'STT_FAIL',
-    message: 'Speech transcription failed. Please try again.',
+    code: pending?.code ?? 'STT_FAIL',
+    message: pending?.message ?? 'Speech transcription failed. Please try again.',
     recoverable: true,
     timestamp_ms: Date.now(),
   };
   sendJson(ws, msg);
-  console.error(`[${ctx.sessionId}] Whisper error — sent error frame to client`);
+  ctx.pendingError = undefined;
+  console.error(`[${ctx.sessionId}] Error sent to client: ${msg.code} — ${msg.message}`);
 }
 
 // ── WS helpers ─────────────────────────────────────────────────

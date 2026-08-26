@@ -119,6 +119,30 @@ let playbackCtx   = null;   // AudioContext at 22050Hz
 let playbackQueue = [];     // queued AudioBufferSourceNode list
 let playbackTime  = 0;      // scheduler time for the next queued chunk
 
+// ── Half-duplex mic gating ────────────────────────────────────────────────────
+// While the assistant's TTS is playing, ignore the mic so it can't hear and
+// transcribe its own voice — that self-echo caused an endless self-reply loop.
+// Server state is useless for this: the server returns to IDLE the instant the
+// LLM finishes, seconds before playback ends. So we gate off the Web Audio
+// playback clock (playbackTime), which knows exactly when audio will finish.
+
+let assistantSpeaking = false;  // true while TTS audio is playing/scheduled
+let unmuteTimer       = null;   // fires once playback (+ echo tail) has finished
+const ECHO_TAIL_MS    = 300;    // keep the mic gated briefly after audio for room-echo decay
+
+function markAssistantSpeaking() {
+  assistantSpeaking = true;
+  const ctx = getPlaybackCtx();
+  // Every new chunk extends playbackTime; reschedule the un-mute for the tail.
+  const remainingMs = Math.max(0, (playbackTime - ctx.currentTime) * 1000) + ECHO_TAIL_MS;
+  if (unmuteTimer) clearTimeout(unmuteTimer);
+  unmuteTimer = setTimeout(() => {
+    assistantSpeaking = false;
+    unmuteTimer = null;
+    log('🎙 mic live (assistant finished speaking)', 'sys');
+  }, remainingMs);
+}
+
 function getPlaybackCtx() {
   if (!playbackCtx || playbackCtx.state === 'closed') {
     playbackCtx = new AudioContext({ sampleRate: 22050 });
@@ -144,6 +168,8 @@ function enqueueTtsChunk(arrayBuffer) {
   source.start(startAt);
   playbackTime = startAt + audioBuf.duration;
   playbackQueue.push(source);
+
+  markAssistantSpeaking();  // gate the mic for the duration of this (and any queued) audio
 }
 
 function flushTtsPlayback() {
@@ -158,6 +184,8 @@ function flushTtsPlayback() {
       playbackCtx.resume();
     });
   }
+  if (unmuteTimer) { clearTimeout(unmuteTimer); unmuteTimer = null; }
+  assistantSpeaking = false;  // audio stopped early — mic goes live again
   log('⚡ TTS flushed (barge-in)', 'sys');
 }
 
@@ -242,6 +270,7 @@ async function initVAD() {
 
     // PRD §2.2 onSpeechStart: send speech_start + begin PCM streaming
     onSpeechStart() {
+      if (assistantSpeaking) return;   // half-duplex: ignore the mic while the assistant is speaking
       isSpeaking    = true;
       speechStartTs = Date.now();
       sendJson({ type: 'speech_start', session_id: SESSION_ID, timestamp_ms: speechStartTs });
@@ -253,6 +282,7 @@ async function initVAD() {
     // frame.audio is Float32Array at 16kHz (FRAME_SIZE = 512 samples)
     onFrameProcessed(probabilities, frame) {
       setMeter(probabilities.isSpeech);
+      if (assistantSpeaking) return;   // never stream our own audio back to the server
 
       if (isSpeaking && ws && ws.readyState === WebSocket.OPEN) {
         const int16 = float32ToInt16(frame);
@@ -262,6 +292,7 @@ async function initVAD() {
 
     // PRD §2.2 onSpeechEnd: send speech_end + stop PCM streaming
     onSpeechEnd() {
+      if (assistantSpeaking || !isSpeaking) return;   // only end a turn we actually started
       const duration = Date.now() - speechStartTs;
       isSpeaking = false;
       setMeter(0);
@@ -271,6 +302,7 @@ async function initVAD() {
 
     // PRD §2.2 onVADMisfire: discard, server resets to IDLE
     onVADMisfire() {
+      if (assistantSpeaking) return;   // echo during playback — ignore
       isSpeaking = false;
       setMeter(0);
       sendJson({ type: 'vad_misfire', session_id: SESSION_ID, timestamp_ms: Date.now() });
@@ -348,6 +380,8 @@ function disconnect() {
 
 function cleanup() {
   isSpeaking = false;
+  assistantSpeaking = false;
+  if (unmuteTimer) { clearTimeout(unmuteTimer); unmuteTimer = null; }
   setMeter(0);
   setUIState('DISCONNECTED');
   setTranscript('Waiting for speech…', false);

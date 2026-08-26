@@ -245,6 +245,31 @@ export function handleInternalEvent(
       break;
     }
 
+    case 'llm_error': {
+      const code = (p?.code as string) ?? 'UNKNOWN';
+      const msg  = (p?.msg as string) ?? 'Unknown LLM error';
+      console.error(`[${ctx.sessionId}] llm_error (${code}): ${msg}`);
+
+      // Only meaningful while an LLM turn is in flight. If we've already reset
+      // (e.g. a late/duplicate error), ignore it rather than emit INVALID_STATE.
+      if (
+        ctx.state !== ServerState.LLM_STREAMING &&
+        ctx.state !== ServerState.TTS_STREAMING &&
+        ctx.state !== ServerState.TOOL_EXECUTING
+      ) {
+        console.warn(`[${ctx.sessionId}] llm_error ignored in state ${ctx.state}`);
+        break;
+      }
+
+      // Stash the real reason so NOTIFY_CLIENT_ERROR surfaces it to the browser.
+      ctx.pendingError = {
+        code: 'LLM_TIMEOUT',
+        message: `LLM request failed (${code}): ${msg}`,
+      };
+      runTransition(ws, ctx, 'llm_error');
+      break;
+    }
+
     default:
       console.log(`[${ctx.sessionId}] Unhandled internal event: ${eventType}`);
   }

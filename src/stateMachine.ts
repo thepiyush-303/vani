@@ -124,6 +124,13 @@ export function transition(
             nextState: ServerState.BARGE_IN_INTERRUPTED,
             sideEffects: ['ABORT_GROQ_STREAM', 'KILL_PIPER'],
           };
+        case 'llm_error':
+          // Groq stream failed (bad key, decommissioned model, network, etc.)
+          // before/while generating — reset to IDLE and surface the real error.
+          return {
+            nextState: ServerState.IDLE,
+            sideEffects: ['ABORT_GROQ_STREAM', 'NOTIFY_CLIENT_ERROR'],
+          };
         default:
           return invalidTransition(currentState, event);
       }
@@ -149,6 +156,12 @@ export function transition(
             nextState: ServerState.BARGE_IN_INTERRUPTED,
             sideEffects: ['KILL_PIPER', 'ABORT_GROQ_STREAM'],
           };
+        case 'llm_error':
+          // Groq stream failed mid-response — stop TTS playback and reset.
+          return {
+            nextState: ServerState.IDLE,
+            sideEffects: ['ABORT_GROQ_STREAM', 'KILL_PIPER', 'NOTIFY_CLIENT_ERROR'],
+          };
         default:
           return invalidTransition(currentState, event);
       }
@@ -167,6 +180,12 @@ export function transition(
           return {
             nextState: ServerState.LLM_STREAMING,
             sideEffects: ['START_GROQ_STREAM'],
+          };
+        case 'llm_error':
+          // LLM continuation after a tool call failed — reset and surface error.
+          return {
+            nextState: ServerState.IDLE,
+            sideEffects: ['ABORT_GROQ_STREAM', 'NOTIFY_CLIENT_ERROR'],
           };
         default:
           return invalidTransition(currentState, event);

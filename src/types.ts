@@ -45,6 +45,7 @@ export type IncomingEventType =
   | 'llm_token'           // internal: text delta from Groq
   | 'llm_tool_call'       // internal: tool_call delta from Groq
   | 'llm_stream_complete' // internal: Groq stream finished
+  | 'llm_error'           // internal: Groq stream failed (bad key/model/network)
   | 'tool_result_ready'   // internal: tool executor finished
   | 'tool_timeout';       // internal: tool exceeded 500ms
 
@@ -206,4 +207,7 @@ export interface SessionContext {
   tokenCount: number;
   turnStartedAt: number | null;
   createdAt: number;
+  // Set just before a NOTIFY_CLIENT_ERROR side-effect so the dispatcher can
+  // send the real error code+message to the client. Cleared after sending.
+  pendingError?: { code: ErrorMessage['code']; message: string };
 }

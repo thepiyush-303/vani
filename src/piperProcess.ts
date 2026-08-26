@@ -16,6 +16,11 @@ const RESTART_DELAY_MS  = 500;
 // PRD §2.4: chunk Piper stdout into 4KB frames for WS streaming
 const WS_CHUNK_BYTES = 4096;
 
+// With a persistent (--json-input) Piper, stdout never 'end's between
+// utterances, so the final sub-WS_CHUNK_BYTES fragment is flushed once stdout
+// has been quiet for this long.
+const IDLE_FLUSH_MS = 200;
+
 // Framing header bytes prepended to every binary WS frame for client-side detection
 // PRD §3.3.2: [0xAF][0xFE][uint16 LE sequence]
 let frameSeq = 0;
@@ -100,6 +105,7 @@ export function kill(): void {
 export function stop(): void {
   isStarted = false;
   if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+  if (idleFlushTimer) { clearTimeout(idleFlushTimer); idleFlushTimer = null; }
   if (proc) { proc.kill('SIGTERM'); proc = null; }
 }
 
@@ -108,6 +114,7 @@ export function stop(): void {
 
 let activeSocket: WebSocket | null = null;
 let pcmBuffer = Buffer.alloc(0);  // accumulate stdout until we have a full WS_CHUNK_BYTES
+let idleFlushTimer: ReturnType<typeof setTimeout> | null = null;  // flushes the tail once stdout goes quiet
 
 function setActiveSocket(ws: WebSocket): void {
   activeSocket = ws;
@@ -116,6 +123,7 @@ function setActiveSocket(ws: WebSocket): void {
 function clearActiveSocket(): void {
   activeSocket = null;
   pcmBuffer = Buffer.alloc(0);
+  if (idleFlushTimer) { clearTimeout(idleFlushTimer); idleFlushTimer = null; }
 }
 
 /**
@@ -152,6 +160,20 @@ function flushPcmBuffer(): void {
   }
 }
 
+/**
+ * Flush the residual PCM tail once Piper's stdout has been quiet for
+ * IDLE_FLUSH_MS. Needed because the persistent Piper never closes stdout
+ * between utterances, so the final sub-WS_CHUNK_BYTES fragment would otherwise
+ * sit in pcmBuffer and bleed into the next turn's audio.
+ */
+function scheduleIdleFlush(): void {
+  if (idleFlushTimer) clearTimeout(idleFlushTimer);
+  idleFlushTimer = setTimeout(() => {
+    idleFlushTimer = null;
+    flushPcmBuffer();
+  }, IDLE_FLUSH_MS);
+}
+
 // ── Internal ──────────────────────────────────────────────────
 
 function spawnPiper(): void {
@@ -179,9 +201,12 @@ function spawnPiper(): void {
     process.stderr.write(`[piper|bin] ${chunk.toString()}`);
   });
 
-  // Stream stdout PCM → active WebSocket in chunked binary frames
+  // Stream stdout PCM → active WebSocket in chunked binary frames.
+  // Reset the idle-flush timer on each chunk so the tail is flushed only once
+  // synthesis for this utterance has actually stopped.
   proc.stdout?.on('data', (chunk: Buffer) => {
     sendPcmChunk(chunk);
+    scheduleIdleFlush();
   });
 
   proc.stdout?.on('end', () => {

@@ -1,6 +1,6 @@
 // ============================================================
 // groqStream.ts — Groq LLM streaming integration
-// PRD §4: Llama 3.1-8B-Instant via Groq LPU, streaming
+// PRD §4: chat LLM via Groq LPU, streaming (model set by GROQ_MODEL env)
 // ============================================================
 
 import Groq from 'groq-sdk';
@@ -13,17 +13,26 @@ const groq = new Groq({
   apiKey: process.env.GROQ_API_KEY ?? '',
 });
 
-const GROQ_MODEL        = process.env.GROQ_MODEL ?? 'llama-3.1-8b-instant';
-const MAX_TOKENS        = 512;   // Keep responses concise for voice UX
+const GROQ_MODEL        = process.env.GROQ_MODEL ?? 'openai/gpt-oss-20b';
+const MAX_TOKENS        = 512;   // Cap only — the system prompt drives brevity; leaves room for a genuinely long answer
 const TEMPERATURE       = 0.7;
 const MAX_RETRIES       = 2;     // Retry once on 429 rate-limit
 const RETRY_DELAY_MS    = 1000;
 
+// gpt-oss models "think" before answering; the model default can spend several
+// seconds reasoning, which blows the voice latency budget. 'low' keeps a little
+// reasoning while cutting time-to-first-token. For the absolute fastest replies
+// set this to 'none' (no reasoning). Options: 'none' | 'low' | 'medium' | 'high'.
+// Only meaningful for gpt-oss / reasoning models.
+const REASONING_EFFORT: 'none' | 'low' | 'medium' | 'high' = 'low';
+
 // ── System prompt ─────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a helpful, concise voice assistant. Keep responses short and conversational \
-— 1 to 3 sentences is ideal. Avoid markdown, bullet points, or lists since your responses are spoken aloud. \
-Speak naturally and directly. If asked for a long list, summarize it briefly instead.`;
+const SYSTEM_PROMPT = `You are a helpful voice assistant. Your replies are spoken aloud, so match their \
+length to the question. For simple, casual, or factual questions, answer in a single short sentence. Use at \
+most one or two sentences for most questions, and never pad a short answer with detail the user did not ask \
+for. Only give a longer, multi-sentence reply when the question genuinely needs it — such as an explanation, \
+a comparison, or step-by-step instructions. Avoid markdown, bullet points, or lists; speak naturally and directly.`;
 
 // ── Abort controller for barge-in ────────────────────────────
 
@@ -128,6 +137,7 @@ async function streamCompletion(
       stream: true,
       max_tokens: MAX_TOKENS,
       temperature: TEMPERATURE,
+      reasoning_effort: REASONING_EFFORT,
     },
     { signal },
   );

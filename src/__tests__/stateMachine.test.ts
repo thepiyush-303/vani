@@ -184,3 +184,32 @@ describe('BARGE_IN_INTERRUPTED state', () => {
     expectInvalidTransition(ServerState.BARGE_IN_INTERRUPTED, 'whisper_final');
   });
 });
+
+// ── llm_error (Groq failure) handling ────────────────────────
+// Regression: a Groq failure must reset to IDLE and notify the client,
+// NOT throw INVALID_STATE and leave the session stuck (see prod incident
+// where llm_error was routed through whisper_error, invalid in LLM_STREAMING).
+
+describe('llm_error handling', () => {
+  it('LLM_STREAMING + llm_error → IDLE, notifies client', () => {
+    expectTransition(ServerState.LLM_STREAMING, 'llm_error', ServerState.IDLE, 'NOTIFY_CLIENT_ERROR');
+  });
+
+  it('TTS_STREAMING + llm_error → IDLE, kills Piper + notifies client', () => {
+    const result = transition(ServerState.TTS_STREAMING, 'llm_error');
+    expect(isTransitionError(result)).toBe(false);
+    if (!isTransitionError(result)) {
+      expect(result.nextState).toBe(ServerState.IDLE);
+      expect(result.sideEffects).toContain('KILL_PIPER');
+      expect(result.sideEffects).toContain('NOTIFY_CLIENT_ERROR');
+    }
+  });
+
+  it('TOOL_EXECUTING + llm_error → IDLE, notifies client', () => {
+    expectTransition(ServerState.TOOL_EXECUTING, 'llm_error', ServerState.IDLE, 'NOTIFY_CLIENT_ERROR');
+  });
+
+  it('llm_error is NOT valid in IDLE (guard against stray/late errors)', () => {
+    expectInvalidTransition(ServerState.IDLE, 'llm_error');
+  });
+});
