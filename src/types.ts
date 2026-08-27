@@ -208,6 +208,13 @@ export interface SessionContext {
   tokenCount: number;
   turnStartedAt: number | null;
   createdAt: number;
+  // Per-turn latency instrumentation (all reset on speech_start). Used to log the
+  // REAL responsiveness breakdown — STT wall time, Groq time-to-first-token, and
+  // perceived speech_end→first-token — instead of the misleading speech_start-based
+  // total_latency_ms. See messageHandler.
+  speechEndAt?: number | null;
+  sttFinalAt?: number | null;
+  firstTokenAt?: number | null;
   // Set just before a NOTIFY_CLIENT_ERROR side-effect so the dispatcher can
   // send the real error code+message to the client. Cleared after sending.
   pendingError?: { code: ErrorMessage['code']; message: string };

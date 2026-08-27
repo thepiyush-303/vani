@@ -3,6 +3,8 @@
 ## CURRENT STATUS
 **Phase 5** — Phase 4 complete. Starting Phase 5: Tool Calling Contracts & Execution.
 
+**Latency pass (2026-08-26):** application-level response-latency optimizations landed (no model change): Groq history capped to last 8 msgs to bound prefill/TTFT; sentence buffer flushes the first chunk on a shorter 60ms timeout for faster first-audio; Whisper `condition_on_previous_text=False`; real per-stage `[latency]` server logs (STT wall, Groq TTFT, perceived). Structural floor remains STT `base.en` (~850ms) + Groq free-tier TTFT (~1s) — strict <1000ms needs the `tiny.en` STT toggle (accuracy tradeoff) or a faster LLM. See `memory/vani_latency_budget.md`.
+
 ---
 
 ## Phase 1: Basic Node Server & WebSocket Setup

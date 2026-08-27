@@ -39,11 +39,16 @@ export function handleTextMessage(
 
     case 'speech_start': {
       ctx.turnStartedAt = Date.now();
+      // Reset per-turn latency markers for a fresh responsiveness measurement.
+      ctx.speechEndAt = null;
+      ctx.sttFinalAt = null;
+      ctx.firstTokenAt = null;
       runTransition(ws, ctx, 'speech_start');
       break;
     }
 
     case 'speech_end': {
+      ctx.speechEndAt = Date.now();  // start of the perceived-latency window
       runTransition(ws, ctx, 'speech_end');
       break;
     }
@@ -189,6 +194,12 @@ export function handleInternalEvent(
       sendJson(ws, msg);
       console.log(`[${ctx.sessionId}] transcript_final: "${text.slice(0, 80)}"`);
 
+      // Latency: STT wall time (speech_end → transcript ready) vs model-only time.
+      ctx.sttFinalAt = Date.now();
+      if (ctx.speechEndAt) {
+        console.log(`[latency] STT: ${ctx.sttFinalAt - ctx.speechEndAt}ms wall (${duration_ms}ms model)`);
+      }
+
       // 2. Append user turn to conversation history for Groq multi-turn
       ctx.conversationHistory.push({ role: 'user', content: text });
 
@@ -207,6 +218,15 @@ export function handleInternalEvent(
     case 'llm_token': {
       const delta      = (p?.delta as string) ?? '';
       const tokenIndex = (p?.tokenIndex as number) ?? 0;
+
+      // Latency: the first token marks Groq's time-to-first-token and the end of
+      // the perceived wait (first audio follows ~one sentence-buffer flush later).
+      if (!ctx.firstTokenAt) {
+        ctx.firstTokenAt = Date.now();
+        const ttft = ctx.sttFinalAt ? ctx.firstTokenAt - ctx.sttFinalAt : -1;
+        const perceived = ctx.speechEndAt ? ctx.firstTokenAt - ctx.speechEndAt : -1;
+        console.log(`[latency] Groq TTFT: ${ttft}ms | perceived speech_end→first token: ${perceived}ms`);
+      }
 
       // 1. Stream token to browser for live text display
       const msg: ServerMessage = {

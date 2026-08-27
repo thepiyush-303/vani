@@ -124,7 +124,7 @@ def transcribe(float32_audio: np.ndarray, utterance_start: float):
             beam_size=1,               # Greedy decoding — fastest
             vad_filter=False,          # VAD handled client-side (PRD §2.2)
             word_timestamps=False,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,  # each utterance is independent; skip cross-utterance context (faster, no hallucinated carry-over)
         )
 
         # Collect all segments (generator) into final text

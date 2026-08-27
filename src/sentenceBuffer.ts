@@ -9,9 +9,14 @@
 // faster to TTS for lower latency audio onset.
 const SENTENCE_END_RE = /[,.?!;:]+\s+|[,.?!;:]+$|\n/;
 
-// Maximum ms to wait before flushing an incomplete fragment anyway. 
+// Maximum ms to wait before flushing an incomplete fragment anyway.
 // We lowered this to force Piper to start synthesizing if the LLM emits a long phrase without punctuation.
 const FLUSH_TIMEOUT_MS = 150;
+
+// The FIRST fragment of a turn is what the user perceives as response latency, so
+// we flush it on a much shorter timeout when no punctuation boundary has arrived
+// yet. Subsequent fragments use the normal timeout to keep mid-reply prosody smooth.
+const FIRST_FLUSH_TIMEOUT_MS = 60;
 
 export type SentenceCallback = (sentence: string) => void;
 
@@ -19,9 +24,18 @@ export class SentenceBuffer {
   private buffer = '';
   private onSentence: SentenceCallback;
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  // True until the first fragment of this turn is emitted; drives the shorter
+  // first-flush timeout so time-to-first-audio is minimized.
+  private firstChunkPending = true;
 
   constructor(onSentence: SentenceCallback) {
     this.onSentence = onSentence;
+  }
+
+  /** Emit a completed fragment and mark that the turn's first chunk has gone out. */
+  private emit(sentence: string): void {
+    this.firstChunkPending = false;
+    this.onSentence(sentence);
   }
 
   /** Append a new token delta from the LLM stream. */
@@ -43,7 +57,7 @@ export class SentenceBuffer {
       this.buffer = this.buffer.slice(endIdx);
 
       if (sentence.length > 0) {
-        this.onSentence(sentence);
+        this.emit(sentence);
       }
     }
 
@@ -51,14 +65,15 @@ export class SentenceBuffer {
     // We DO NOT clear the timer on every token anymore, otherwise a fast LLM token flood
     // without punctuation would wait indefinitely for the stream to end!
     if (this.buffer.trim().length > 0 && !this.flushTimer) {
+      const timeout = this.firstChunkPending ? FIRST_FLUSH_TIMEOUT_MS : FLUSH_TIMEOUT_MS;
       this.flushTimer = setTimeout(() => {
         const remaining = this.buffer.trim();
         if (remaining.length > 0) {
           this.buffer = '';
-          this.onSentence(remaining);
+          this.emit(remaining);
         }
         this.flushTimer = null;
-      }, FLUSH_TIMEOUT_MS);
+      }, timeout);
     }
   }
 
@@ -74,7 +89,7 @@ export class SentenceBuffer {
     const remaining = this.buffer.trim();
     this.buffer = '';
     if (remaining.length > 0) {
-      this.onSentence(remaining);
+      this.emit(remaining);
     }
   }
 
@@ -85,5 +100,6 @@ export class SentenceBuffer {
       this.flushTimer = null;
     }
     this.buffer = '';
+    this.firstChunkPending = true;
   }
 }

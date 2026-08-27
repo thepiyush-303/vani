@@ -7,3 +7,4 @@ run-smoke.sh
 codebase_walkthrough.md
 venv
 dist
+__pycache__

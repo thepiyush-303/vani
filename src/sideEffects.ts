@@ -140,7 +140,7 @@ function openWhisperPipe(ctx: SessionContext): void {
 
 function sendEofToWhisper(ctx: SessionContext): void {
   const frameCount = ctx.audioBuffer.length;
-  const byteCount  = ctx.audioBuffer.reduce((s, b) => s + b.length, 0);
+  const byteCount = ctx.audioBuffer.reduce((s, b) => s + b.length, 0);
   console.log(`[${ctx.sessionId}] SEND_EOF_TO_WHISPER — flushing ${frameCount} frames (${byteCount} bytes)`);
 
   // Write all buffered PCM frames to Whisper stdin
@@ -197,37 +197,37 @@ function executeTool(ws: WebSocket, ctx: SessionContext): void {
     return;
   }
   ctx.pendingToolCall = undefined;
-  
+
   const emit = internalEventEmitter;
   if (!emit) return;
-  
+
   console.log(`[${ctx.sessionId}] EXECUTE_TOOL: ${tool.name}(${tool.args})`);
-  
+
   // In a real app we'd dispatch to a registry. Here we just hardcode weather.
   if (tool.name === 'get_weather') {
     executeWeatherTool(tool.args).then(result => {
-        // Append result to history
-        ctx.conversationHistory.push({
-            role: 'tool',
-            content: result,
-            tool_call_id: tool.id,
-        });
-        emit('tool_result_ready');
+      // Append result to history
+      ctx.conversationHistory.push({
+        role: 'tool',
+        content: result,
+        tool_call_id: tool.id,
+      });
+      emit('tool_result_ready');
     }).catch(err => {
-        console.error(`[${ctx.sessionId}] Tool execution failed:`, err);
-        ctx.conversationHistory.push({
-            role: 'tool',
-            content: JSON.stringify({ error: "Tool execution failed locally" }),
-            tool_call_id: tool.id,
-        });
-        emit('tool_result_ready');
+      console.error(`[${ctx.sessionId}] Tool execution failed:`, err);
+      ctx.conversationHistory.push({
+        role: 'tool',
+        content: JSON.stringify({ error: "Tool execution failed locally" }),
+        tool_call_id: tool.id,
+      });
+      emit('tool_result_ready');
     });
   } else {
     // Unrecognized tool
     ctx.conversationHistory.push({
-        role: 'tool',
-        content: JSON.stringify({ error: `Tool ${tool.name} is not implemented` }),
-        tool_call_id: tool.id,
+      role: 'tool',
+      content: JSON.stringify({ error: `Tool ${tool.name} is not implemented` }),
+      tool_call_id: tool.id,
     });
     emit('tool_result_ready');
   }
@@ -290,7 +290,7 @@ function sendTurnComplete(ws: WebSocket, ctx: SessionContext): void {
 
   sendJson(ws, msg);
   ctx.turnStartedAt = null;
-  ctx.tokenCount    = 0;
+  ctx.tokenCount = 0;
   // Do NOT kill Piper here. It is a persistent --json-input daemon that is
   // still synthesizing the sentences we just queued; SIGTERM would cut the
   // audio before any PCM is produced (the turn "completes" the instant the LLM

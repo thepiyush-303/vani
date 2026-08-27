@@ -5,7 +5,7 @@
 
 import Groq from 'groq-sdk';
 import WebSocket from 'ws';
-import { SessionContext } from './types';
+import { SessionContext, ConversationMessage } from './types';
 import { weatherToolDefinition } from './tools/weather';
 
 // ── Groq client singleton ─────────────────────────────────────
@@ -19,6 +19,14 @@ const MAX_TOKENS = 512;   // Cap only — the system prompt drives brevity; leav
 const TEMPERATURE = 0.7;
 const MAX_RETRIES = 2;     // Retry once on 429 rate-limit
 const RETRY_DELAY_MS = 1000;
+
+// Cap how many prior turns we replay to Groq per request. The full transcript
+// stays in memory, but only the system prompt + the last N messages are SENT.
+// This bounds prompt-prefill work so time-to-first-token stays low and roughly
+// constant as the conversation grows — an unbounded history slows every
+// subsequent turn (more prefill + more upload) and eventually overflows the
+// model's context window. 8 ≈ the last 4 exchanges, plenty for voice context.
+const MAX_HISTORY_MESSAGES = 8;
 
 // gpt-oss models "think" before answering; the model default can spend several
 // seconds reasoning, which blows the voice latency budget. 'low' keeps a little
@@ -61,6 +69,23 @@ export function abortGroqStream(): void {
   }
 }
 
+// ── History window ────────────────────────────────────────────
+
+/**
+ * Return the tail of the conversation we actually send to Groq: at most
+ * MAX_HISTORY_MESSAGES most-recent messages. Never begins the window on an
+ * orphaned `tool` result — Groq rejects a tool message whose preceding
+ * assistant tool_call was trimmed away — so leading tool messages are dropped.
+ */
+function capHistory(history: ConversationMessage[]): ConversationMessage[] {
+  if (history.length <= MAX_HISTORY_MESSAGES) return history;
+  let sliced = history.slice(-MAX_HISTORY_MESSAGES);
+  while (sliced.length > 0 && sliced[0].role === 'tool') {
+    sliced = sliced.slice(1);
+  }
+  return sliced;
+}
+
 // ── Public API ────────────────────────────────────────────────
 
 export type GroqEventCallback = (
@@ -89,14 +114,16 @@ export async function startGroqStream(
   }
 
   // Build message array with system prompt prepended.
+  // Only the capped tail of the transcript is sent (see capHistory) to keep prefill small.
   // IMPORTANT: we must correctly serialize all 4 message types:
   //   1. user   — plain text
   //   2. assistant — plain text response
   //   3. assistant — with tool_calls array (the model's tool invocation request)
   //   4. tool   — tool execution result (has tool_call_id)
+  const history = capHistory(ctx.conversationHistory);
   const messages: Groq.Chat.ChatCompletionMessageParam[] = [
     { role: 'system', content: SYSTEM_PROMPT },
-    ...ctx.conversationHistory.map((m) => {
+    ...history.map((m) => {
       if (m.role === 'tool') {
         return {
           role: 'tool' as const,
@@ -120,7 +147,7 @@ export async function startGroqStream(
   ];
 
 
-  console.log(`[groq] Starting stream — model=${GROQ_MODEL} history=${ctx.conversationHistory.length} msgs`);
+  console.log(`[groq] Starting stream — model=${GROQ_MODEL} history=${history.length}/${ctx.conversationHistory.length} msgs sent`);
 
   activeAbortController = new AbortController();
   const signal = activeAbortController.signal;
