@@ -9,6 +9,7 @@ import * as whisperProcess from './whisperProcess';
 import * as piperProcess from './piperProcess';
 import { SentenceBuffer } from './sentenceBuffer';
 import { startGroqStream, abortGroqStream } from './groqStream';
+import { startGeminiStream, abortGeminiStream } from './geminiStream';
 import { setActiveSentenceBuffer } from './sharedState';
 import { executeWeatherTool } from './tools/weather';
 
@@ -100,11 +101,11 @@ export function dispatchSideEffects(
       case 'DISCARD_WHISPER_BUFFER':
         discardWhisperBuffer(ctx);
         break;
-      case 'START_GROQ_STREAM':
-        triggerGroqStream(ctx);
+      case 'START_LLM_STREAM':
+        triggerLLMStream(ctx);
         break;
-      case 'ABORT_GROQ_STREAM':
-        triggerAbortGroq(ctx);
+      case 'ABORT_LLM_STREAM':
+        triggerAbortLLM(ctx);
         break;
       case 'SPAWN_PIPER':
         spawnPiper(ws, ctx);
@@ -233,44 +234,52 @@ function executeTool(ws: WebSocket, ctx: SessionContext): void {
   }
 }
 
-// ── Groq LLM side-effects ─────────────────────────────────────
+// ── Generic LLM side-effects ──────────────────────────────────
 
-function triggerGroqStream(ctx: SessionContext): void {
+function triggerLLMStream(ctx: SessionContext): void {
   if (!internalEventEmitter) {
-    console.warn(`[${ctx.sessionId}] START_GROQ_STREAM: internalEventEmitter not set`);
+    console.warn(`[${ctx.sessionId}] START_LLM_STREAM: internalEventEmitter not set`);
     return;
   }
 
   const emit = internalEventEmitter;
+  const provider = process.env.LLM_PROVIDER ?? 'groq';
+  
+  const startStreamPhase = provider === 'gemini' ? startGeminiStream : startGroqStream;
 
   // Fire-and-forget (async stream runs in background)
-  startGroqStream(ctx, (ev) => {
+  startStreamPhase(ctx, (ev) => {
     switch (ev.type) {
       case 'llm_token':
         emit('llm_token', { delta: ev.delta, tokenIndex: ev.tokenIndex });
         break;
       case 'llm_tool_call':
-        emit('llm_tool_call', { name: ev.name, args: ev.args });
+        emit('llm_tool_call', { name: ev.name, args: ev.args, id: ev.id });
         break;
       case 'llm_stream_complete':
         emit('llm_stream_complete', { fullText: ev.fullText });
         break;
       case 'llm_error':
-        console.error(`[groq] Error ${ev.code}: ${ev.msg}`);
-        emit('llm_error', { code: ev.code, msg: ev.msg }); // reset to IDLE + surface real error
+        console.error(`[llm] Error ${ev.code}: ${ev.msg}`);
+        emit('llm_error', { code: ev.code, msg: ev.msg });
         break;
     }
   }).catch((err) => {
-    console.error(`[groq] Unhandled stream error: ${err}`);
-    emit('llm_error', { code: 'GROQ_FATAL', msg: String(err) });
+    console.error(`[llm] Unhandled stream error: ${err}`);
+    emit('llm_error', { code: 'LLM_FATAL', msg: String(err) });
   });
 
-  console.log(`[${ctx.sessionId}] START_GROQ_STREAM — Groq stream initiated`);
+  console.log(`[${ctx.sessionId}] START_LLM_STREAM — ${provider} stream initiated`);
 }
 
-function triggerAbortGroq(ctx: SessionContext): void {
-  console.log(`[${ctx.sessionId}] ABORT_GROQ_STREAM — aborting Groq stream`);
-  abortGroqStream();
+function triggerAbortLLM(ctx: SessionContext): void {
+  console.log(`[${ctx.sessionId}] ABORT_LLM_STREAM — aborting LLM stream`);
+  const provider = process.env.LLM_PROVIDER ?? 'groq';
+  if (provider === 'gemini') {
+    abortGeminiStream();
+  } else {
+    abortGroqStream();
+  }
 }
 
 // ── Completion & error messages ───────────────────────────────
