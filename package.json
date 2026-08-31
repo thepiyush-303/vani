@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@google/genai": "^2.19.0",
+    "@picovoice/porcupine-web": "^4.0.1",
     "dotenv": "^17.4.2",
     "groq-sdk": "^1.5.0",
     "uuid": "^9.0.1",

@@ -94,6 +94,8 @@ export type GroqEventCallback = (
     | { type: 'llm_tool_call'; name: string; args: string; id: string }
     | { type: 'llm_stream_complete'; fullText: string }
     | { type: 'llm_error'; code: string; msg: string }
+    // v2.0 Phase 9: Gemini-only — grounding metadata from Search Grounding
+    | { type: 'grounding_sources'; queries: string[]; sources: Array<{ title: string; uri: string }> }
 ) => void;
 
 /**

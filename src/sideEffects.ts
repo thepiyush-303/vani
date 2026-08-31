@@ -12,6 +12,7 @@ import { startGroqStream, abortGroqStream } from './groqStream';
 import { startGeminiStream, abortGeminiStream } from './geminiStream';
 import { setActiveSentenceBuffer } from './sharedState';
 import { executeWeatherTool } from './tools/weather';
+import { executeTodoistTool } from './tools/todoist';
 
 // ── Sentence buffer & internal event callback ─────────────────
 
@@ -207,7 +208,6 @@ function executeTool(ws: WebSocket, ctx: SessionContext): void {
   // In a real app we'd dispatch to a registry. Here we just hardcode weather.
   if (tool.name === 'get_weather') {
     executeWeatherTool(tool.args).then(result => {
-      // Append result to history
       ctx.conversationHistory.push({
         role: 'tool',
         content: result,
@@ -218,7 +218,24 @@ function executeTool(ws: WebSocket, ctx: SessionContext): void {
       console.error(`[${ctx.sessionId}] Tool execution failed:`, err);
       ctx.conversationHistory.push({
         role: 'tool',
-        content: JSON.stringify({ error: "Tool execution failed locally" }),
+        content: JSON.stringify({ error: 'Tool execution failed locally' }),
+        tool_call_id: tool.id,
+      });
+      emit('tool_result_ready');
+    });
+  } else if (tool.name === 'add_todoist_task') {
+    executeTodoistTool(tool.args).then(result => {
+      ctx.conversationHistory.push({
+        role: 'tool',
+        content: result,
+        tool_call_id: tool.id,
+      });
+      emit('tool_result_ready');
+    }).catch(err => {
+      console.error(`[${ctx.sessionId}] Todoist tool failed:`, err);
+      ctx.conversationHistory.push({
+        role: 'tool',
+        content: JSON.stringify({ success: false, error: 'Todoist request failed.' }),
         tool_call_id: tool.id,
       });
       emit('tool_result_ready');
@@ -263,6 +280,22 @@ function triggerLLMStream(ctx: SessionContext): void {
         console.error(`[llm] Error ${ev.code}: ${ev.msg}`);
         emit('llm_error', { code: ev.code, msg: ev.msg });
         break;
+      case 'grounding_sources': {
+        // Broadcast grounding attribution to the client WebSocket (Phase 9)
+        // This event does NOT affect the state machine.
+        const ws = activeWs;
+        if (ws) {
+          const msg: ServerMessage = {
+            type: 'grounding_sources',
+            session_id: ctx.sessionId,
+            queries: (ev as any).queries ?? [],
+            sources: (ev as any).sources ?? [],
+            timestamp_ms: Date.now(),
+          };
+          sendJson(ws, msg);
+        }
+        break;
+      }
     }
   }).catch((err) => {
     console.error(`[llm] Unhandled stream error: ${err}`);

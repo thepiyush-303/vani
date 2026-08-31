@@ -1,10 +1,12 @@
 // ============================================================
 // geminiStream.ts — Gemini LLM streaming integration using @google/genai
+// v2.0: Adds Search Grounding, Todoist tool, and sanitizeForTTS.
 // ============================================================
 
 import { GoogleGenAI } from '@google/genai';
 import { SessionContext } from './types';
-import { weatherToolDefinition } from './tools/weather';
+import { todoistToolDeclaration } from './tools/todoist';
+import { sanitizeForTTS } from './ttsUtils';
 import { GroqEventCallback } from './groqStream'; // we reuse the callback type
 
 // ── Gemini client singleton ───────────────────────────────────
@@ -16,18 +18,21 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 // User specified gemini-2.5-flash-lite in the request
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash-lite';
 
-const SYSTEM_PROMPT = `You are a helpful, concise voice assistant. Your replies are spoken aloud.
+const SYSTEM_PROMPT = `You are Vani, a helpful and concise voice assistant. Your replies are spoken aloud.
 
 SPEECH STYLE:
 - For casual/factual questions: answer in 1-2 sentences maximum.
-- Never use markdown, bullet points, or lists — speak naturally.
+- Never use markdown, bullet points, lists, or URLs — speak naturally.
 - Only give longer replies when the user asks for a story, explanation, or step-by-step instructions.
 
-TOOL USE — CRITICAL RULE:
-- You have access to a get_weather tool.
+TOOL USE — CRITICAL RULES:
+- You have access to: get_weather, add_todoist_task, and Google Search (grounding).
 - ONLY call get_weather when the user EXPLICITLY asks about current weather or temperature for a specific place.
-- NEVER call any tool for creative questions, stories, general knowledge, jokes, opinions, or anything that does not require real-time external data.
-- If you are unsure whether to call a tool, DO NOT call it — just answer directly.`;
+- ONLY call add_todoist_task when the user explicitly asks to add a reminder, task, or to-do item.
+- For general knowledge and current events, rely on your Google Search grounding.
+- NEVER call any tool for creative questions, stories, opinions, or anything that does not require real-time external data.
+- If you are unsure whether to call a tool, DO NOT call it — just answer directly.
+- NEVER read URLs, citation brackets like [1], or web addresses out loud.`;
 
 let activeAbortController: AbortController | null = null;
 
@@ -40,26 +45,43 @@ export function abortGeminiStream(): void {
 }
 
 /**
- * We map the function declaration format specifically for Gemini.
+ * Weather tool in Gemini functionDeclarations format.
  */
 const geminiWeatherTool = {
   functionDeclarations: [
     {
-      name: "get_weather",
-      description: "Get the current weather in a given location",
+      name: 'get_weather',
+      description: 'Get the current weather in a given location',
       parameters: {
-        type: "OBJECT",
+        type: 'OBJECT',
         properties: {
           location: {
-            type: "STRING",
-            description: "The city and state, e.g. San Francisco, CA",
+            type: 'STRING',
+            description: 'The city and state, e.g. San Francisco, CA',
           },
         },
-        required: ["location"],
+        required: ['location'],
       },
-    }
-  ]
+    },
+  ],
 };
+
+/**
+ * Todoist tool in Gemini functionDeclarations format.
+ * Bundled with weather in a single functionDeclarations array.
+ */
+const geminiFunctionTools = {
+  functionDeclarations: [
+    geminiWeatherTool.functionDeclarations[0],
+    todoistToolDeclaration,
+  ],
+};
+
+/**
+ * Google Search Grounding tool (PRD_v2.md §B.2).
+ * Mutually exclusive with tool_choice:"any" — always use auto (default).
+ */
+const googleSearchTool = { googleSearch: {} };
 
 export async function startGeminiStream(
   ctx: SessionContext,
@@ -84,13 +106,13 @@ export async function startGeminiStream(
   const contents = ctx.conversationHistory.map((m) => {
     if (m.role === 'tool') {
       return {
-        role: 'user', // For gemini SDK, tool result is typically passed as 'user' role with part.functionResponse or natively handling functionResponse
+        role: 'user', // For gemini SDK, tool result is passed as 'user' role with functionResponse
         parts: [{ 
             functionResponse: { 
-                name: (m as any).tool_call_id || "get_weather", 
+                name: (m as any).tool_call_id || 'get_weather', 
                 response: JSON.parse(m.content || '{}') 
             } 
-        }]
+        }],
       };
     }
     if (m.role === 'assistant' && (m as any).tool_calls && (m as any).tool_calls.length > 0) {
@@ -100,9 +122,9 @@ export async function startGeminiStream(
         parts: [{
             functionCall: {
                 name: tc.name,
-                args: typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments
-            }
-        }]
+                args: typeof tc.arguments === 'string' ? JSON.parse(tc.arguments) : tc.arguments,
+            },
+        }],
       };
     }
     return {
@@ -161,15 +183,19 @@ async function streamCompletion(
   useTools: boolean,
 ): Promise<void> {
 
-  if (!ai) throw new Error("Gemini AI instance is null");
+  if (!ai) throw new Error('Gemini AI instance is null');
+
+  const tools = useTools
+    ? [googleSearchTool as any, geminiFunctionTools as any]
+    : undefined;
 
   const stream = await ai.models.generateContentStream({
     model: GEMINI_MODEL,
     contents,
     config: {
       systemInstruction: SYSTEM_PROMPT,
-      tools: useTools ? [geminiWeatherTool] as any : undefined,
-    }
+      tools,
+    },
   });
 
   let fullText = '';
@@ -179,8 +205,12 @@ async function streamCompletion(
   let inThinkBlock = false;
   let thinkBuffer = '';
 
+  // We need to capture the last chunk for groundingMetadata
+  let lastChunk: any = null;
+
   for await (const chunk of stream) {
     if (signal.aborted) throw new Error('AbortError');
+    lastChunk = chunk;
     
     // Check for tool calls natively
     if (chunk.functionCalls && chunk.functionCalls.length > 0) {
@@ -195,18 +225,17 @@ async function streamCompletion(
         args: tcArgs,
       };
       
-      // Gemini usually returns tool calls completely in one go, unlike Groq's token delta stream
+      // Gemini usually returns tool calls completely in one go
       ctx.conversationHistory.push({
         role: 'assistant',
         content: '',
         tool_call_id: tcId,
       });
-      // Mock for standard SDK
       const lastMsg = ctx.conversationHistory[ctx.conversationHistory.length - 1];
       (lastMsg as any).tool_calls = [{
         id: tcId,
         type: 'function',
-        function: { name: tcName, arguments: tcArgs }
+        function: { name: tcName, arguments: tcArgs },
       }];
       
       onEvent({
@@ -230,9 +259,12 @@ async function streamCompletion(
           const rest = thinkBuffer.slice(endIdx + 8);
           thinkBuffer = '';
           if (rest) {
-             fullText += rest;
-             ctx.tokenCount++;
-             onEvent({ type: 'llm_token', delta: rest, tokenIndex: tokenIndex++ });
+            const clean = sanitizeForTTS(rest);
+            if (clean) {
+              fullText += clean;
+              ctx.tokenCount++;
+              onEvent({ type: 'llm_token', delta: clean, tokenIndex: tokenIndex++ });
+            }
           }
         }
       } else {
@@ -242,9 +274,12 @@ async function streamCompletion(
         if (startIdx !== -1) {
           const before = thinkBuffer.slice(0, startIdx);
           if (before) {
-             fullText += before;
-             ctx.tokenCount++;
-             onEvent({ type: 'llm_token', delta: before, tokenIndex: tokenIndex++ });
+            const clean = sanitizeForTTS(before);
+            if (clean) {
+              fullText += clean;
+              ctx.tokenCount++;
+              onEvent({ type: 'llm_token', delta: clean, tokenIndex: tokenIndex++ });
+            }
           }
           inThinkBlock = true;
           thinkBuffer = thinkBuffer.slice(startIdx + 7);
@@ -255,37 +290,67 @@ async function streamCompletion(
              const after = thinkBuffer.slice(endIdx + 8);
              thinkBuffer = '';
              if (after) {
-                fullText += after;
-                ctx.tokenCount++;
-                onEvent({ type: 'llm_token', delta: after, tokenIndex: tokenIndex++ });
+               const clean = sanitizeForTTS(after);
+               if (clean) {
+                 fullText += clean;
+                 ctx.tokenCount++;
+                 onEvent({ type: 'llm_token', delta: clean, tokenIndex: tokenIndex++ });
+               }
              }
           }
         } else {
-          // Check trailing buffer
+          // Check trailing buffer for partial <think> tag
           let holdIdx = -1;
           for (let i = thinkBuffer.length - 1; i >= Math.max(0, thinkBuffer.length - 7); i--) {
-            if (thinkBuffer[i] === '<' && "<think>".startsWith(thinkBuffer.slice(i))) {
+            if (thinkBuffer[i] === '<' && '<think>'.startsWith(thinkBuffer.slice(i))) {
               holdIdx = i;
               break;
             }
           }
           
           if (holdIdx !== -1) {
-             const before = thinkBuffer.slice(0, holdIdx);
-             if (before) {
-                fullText += before;
+            const before = thinkBuffer.slice(0, holdIdx);
+            if (before) {
+              const clean = sanitizeForTTS(before);
+              if (clean) {
+                fullText += clean;
                 ctx.tokenCount++;
-                onEvent({ type: 'llm_token', delta: before, tokenIndex: tokenIndex++ });
-             }
-             thinkBuffer = thinkBuffer.slice(holdIdx);
+                onEvent({ type: 'llm_token', delta: clean, tokenIndex: tokenIndex++ });
+              }
+            }
+            thinkBuffer = thinkBuffer.slice(holdIdx);
           } else {
-             fullText += thinkBuffer;
-             ctx.tokenCount++;
-             onEvent({ type: 'llm_token', delta: thinkBuffer, tokenIndex: tokenIndex++ });
-             thinkBuffer = '';
+            const clean = sanitizeForTTS(thinkBuffer);
+            if (clean) {
+              fullText += clean;
+              ctx.tokenCount++;
+              onEvent({ type: 'llm_token', delta: clean, tokenIndex: tokenIndex++ });
+            }
+            thinkBuffer = '';
           }
         }
       }
+    }
+  }
+
+  // ── Stream done: extract Grounding metadata (PRD_v2.md §B.3) ──
+  // groundingMetadata is on the final candidate — check the last chunk.
+  if (lastChunk) {
+    const candidate = lastChunk.candidates?.[0];
+    const meta = candidate?.groundingMetadata;
+    if (meta) {
+      console.log('[gemini] [grounding] queries:', meta.webSearchQueries);
+      console.log('[gemini] [grounding] sources:', meta.groundingChunks?.map((c: any) => c.web?.uri));
+
+      // Emit a new internal event so sideEffects.ts can broadcast it to the client WS
+      onEvent({
+        type: 'grounding_sources',
+        queries: meta.webSearchQueries ?? [],
+        sources: (meta.groundingChunks ?? []).map((c: any) => ({
+          title: c.web?.title ?? '',
+          uri: c.web?.uri ?? '',
+        })),
+      } as any);
     }
   }
 

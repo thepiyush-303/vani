@@ -39,16 +39,18 @@ export type IncomingEventType =
   | 'speech_end'
   | 'vad_misfire'
   | 'tool_result'
+  | 'wake_word_detected'  // v2.0 Phase 8: client detected Porcupine wake word
   | 'pcm_binary'          // internal tag for binary WS frames
   | 'whisper_partial'     // internal: from Whisper subprocess stdout
   | 'whisper_final'       // internal: from Whisper subprocess stdout
   | 'whisper_error'       // internal: from Whisper subprocess stdout
-  | 'llm_token'           // internal: text delta from Groq
-  | 'llm_tool_call'       // internal: tool_call delta from Groq
-  | 'llm_stream_complete' // internal: Groq stream finished
-  | 'llm_error'           // internal: Groq stream failed (bad key/model/network)
+  | 'llm_token'           // internal: text delta from Groq/Gemini
+  | 'llm_tool_call'       // internal: tool_call delta from Groq/Gemini
+  | 'llm_stream_complete' // internal: LLM stream finished
+  | 'llm_error'           // internal: LLM stream failed (bad key/model/network)
   | 'tool_result_ready'   // internal: tool executor finished
-  | 'tool_timeout';       // internal: tool exceeded 500ms
+  | 'tool_timeout'        // internal: tool exceeded 500ms
+  | 'grounding_sources';  // internal: Gemini grounding metadata (Phase 9)
 
 export interface IncomingEvent {
   type: IncomingEventType;
@@ -100,12 +102,22 @@ export interface ToolResultMessage {
   error: string | null;
 }
 
+// v2.0 Phase 8: client → server, logged only — no server state change
+export interface WakeWordDetectedMessage {
+  type: 'wake_word_detected';
+  session_id: string;
+  keyword: string;
+  confidence: number;
+  timestamp_ms: number;
+}
+
 export type ClientMessage =
   | SessionInitMessage
   | SpeechStartMessage
   | SpeechEndMessage
   | VadMisfireMessage
-  | ToolResultMessage;
+  | ToolResultMessage
+  | WakeWordDetectedMessage;
 
 // ── Server → Client JSON Messages (PRD §3.3.2) ───────────────
 
@@ -181,6 +193,15 @@ export interface ErrorMessage {
   timestamp_ms: number;
 }
 
+// v2.0 Phase 9: server → client, rendered as visual attribution panel (never spoken)
+export interface GroundingSourcesMessage {
+  type: 'grounding_sources';
+  session_id: string;
+  queries: string[];
+  sources: Array<{ title: string; uri: string }>;
+  timestamp_ms: number;
+}
+
 export type ServerMessage =
   | SessionAckMessage
   | StateChangeMessage
@@ -190,7 +211,8 @@ export type ServerMessage =
   | ToolCallMessage
   | TtsInterruptedMessage
   | TurnCompleteMessage
-  | ErrorMessage;
+  | ErrorMessage
+  | GroundingSourcesMessage;
 
 // ── Session Context ───────────────────────────────────────────
 

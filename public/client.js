@@ -1,19 +1,16 @@
 /**
- * client.js — Phase 2: Client VAD & Audio Capture
+ * client.js — v2.0: Porcupine Wake Word + Silero VAD + Grounding Attribution
  *
  * Responsibilities:
- *   1. Connect to WS on ws://localhost:8765
- *   2. Send session_init handshake
- *   3. Initialize Silero VAD (@ricky0123/vad-web) with PRD §2.2 parameters
- *   4. On speech events: stream 16kHz Int16 PCM binary frames to server
- *   5. Handle all server→client messages (state_change, transcript_*, tts_interrupted, etc.)
+ *   1. Boot in ASLEEP state — Porcupine polls mic for "Hey Porcupine" wake word
+ *   2. On wake: open WebSocket, play chime, init Silero VAD → LISTENING
+ *   3. Stream 16kHz Int16 PCM binary frames via WebSocket
+ *   4. Handle server→client messages (state_change, transcript_*, tts_interrupted,
+ *      grounding_sources, turn_complete, etc.)
+ *   5. Auto-return to ASLEEP after 30s inactivity post turn_complete
  *
- * Audio format (PRD §2.1):
- *   16kHz, mono, 16-bit signed PCM, 512-sample chunks = 1024 bytes/frame
- *
- * VAD parameters (PRD §2.2):
- *   frameSamples=512, positiveSpeechThreshold=0.50, negativeSpeechThreshold=0.35
- *   minSpeechFrames=3, preSpeechPadFrames=5, redemptionFrames=8
+ * Phase 8 (Wake Word): requires /porcupine/index.min.js and PICOVOICE_ACCESS_KEY in index.html
+ * Phase 9 (Grounding): grounding_sources rendered as a clickable sources panel
  */
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -22,6 +19,11 @@ const WS_URL      = 'ws://localhost:8765';
 const SAMPLE_RATE = 16000;          // PRD §2.1: exactly 16kHz
 const FRAME_SIZE  = 512;            // PRD §2.1 / §2.2: 512 samples = 32ms @ 16kHz
 const SESSION_ID  = crypto.randomUUID();
+
+// v2.0 Phase 8: Picovoice key injected by server into the <meta> tag at serve time.
+// Falls back gracefully to null if not configured (manual connect button shown).
+const PICOVOICE_KEY = document.getElementById('pv-key')?.content || null;
+const INACTIVITY_MS = 30_000; // return to ASLEEP 30s after turn_complete
 
 // ── PRD §2.2 Silero VAD parameters ────────────────────────────────────────────
 
@@ -38,6 +40,9 @@ const VAD_CONFIG = {
 
 let ws            = null;          // WebSocket instance
 let vad           = null;          // MicVAD instance
+let porcupine     = null;          // v2.0: PorcupineWorker instance
+let clientState   = 'ASLEEP';      // v2.0: ASLEEP | WAKING | IDLE | ... (mirrors server states)
+let inactivityTimer = null;        // v2.0: auto-sleep timer
 let isSpeaking    = false;         // true while VAD reports active speech
 let serverState   = 'DISCONNECTED';
 let speechStartTs = 0;             // epoch ms when current utterance started
@@ -51,14 +56,17 @@ const PRE_BUFFER_FRAMES = 16;      // ~512ms of pre-roll at 32ms/frame
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 
-const dot          = document.getElementById('status-dot');
-const stateLabel   = document.getElementById('state-label');
-const vadMeter     = document.getElementById('vad-meter');
-const transcriptEl = document.getElementById('transcript');
-const aiResponseEl = document.getElementById('ai-response');
-const btnConnect   = document.getElementById('btn-connect');
-const btnDisconnect= document.getElementById('btn-disconnect');
-const logEl        = document.getElementById('log');
+const dot           = document.getElementById('status-dot');
+const stateLabel    = document.getElementById('state-label');
+const vadMeter      = document.getElementById('vad-meter');
+const transcriptEl  = document.getElementById('transcript');
+const aiResponseEl  = document.getElementById('ai-response');
+const btnConnect    = document.getElementById('btn-connect');
+const btnDisconnect = document.getElementById('btn-disconnect');
+const logEl         = document.getElementById('log');
+const wakeBadge     = document.getElementById('wake-badge');       // v2.0 Phase 8
+const groundingPanel= document.getElementById('grounding-panel'); // v2.0 Phase 9
+const groundingLinks= document.getElementById('grounding-links'); // v2.0 Phase 9
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
 
@@ -67,9 +75,14 @@ function setUIState(state) {
   stateLabel.textContent = state;
 
   dot.className = 'dot';
-  if (state === 'LISTENING')            dot.classList.add('listening');
-  else if (state === 'DISCONNECTED' || state === 'IDLE') dot.classList.add('idle');
-  else                                  dot.classList.add('active');
+  if (state === 'ASLEEP')                                    dot.classList.add('asleep');
+  else if (state === 'WAKING')                               dot.classList.add('waking');
+  else if (state === 'LISTENING')                            dot.classList.add('listening');
+  else if (state === 'DISCONNECTED' || state === 'IDLE')     dot.classList.add('idle');
+  else                                                        dot.classList.add('active');
+
+  // Show wake badge only in ASLEEP state
+  if (wakeBadge) wakeBadge.style.display = (state === 'ASLEEP') ? 'block' : 'none';
 }
 
 function log(msg, type = 'sys') {
@@ -342,7 +355,31 @@ function handleServerMessage(msg) {
       log(`✓ turn_complete (${msg.total_latency_ms}ms, ${msg.token_count} tokens)`, 'in');
       finalizeAiResponse();
       setUIState('IDLE');
+      // v2.0 Phase 8: start inactivity timer — go back to ASLEEP if user doesn't speak within 30s
+      startInactivityTimer();
       break;
+
+    case 'grounding_sources': {
+      // v2.0 Phase 9: render source attribution panel (never spoken)
+      if (!groundingPanel || !groundingLinks) break;
+      if (!msg.sources || msg.sources.length === 0) {
+        groundingPanel.style.display = 'none';
+        break;
+      }
+      groundingLinks.innerHTML = '';
+      msg.sources.slice(0, 5).forEach(src => {
+        const a = document.createElement('a');
+        a.href    = src.uri;
+        a.target  = '_blank';
+        a.rel     = 'noopener noreferrer';
+        a.title   = src.uri;
+        a.textContent = src.title || src.uri;
+        groundingLinks.appendChild(a);
+      });
+      groundingPanel.style.display = 'block';
+      log(`🔍 grounding: ${msg.sources.length} source(s)`, 'in');
+      break;
+    }
 
     case 'error':
       log(`✗ error [${msg.code}]: ${msg.message}`, 'err');
@@ -395,6 +432,8 @@ async function initVAD() {
     // PRD §2.2 onSpeechStart: send speech_start + begin PCM streaming
     onSpeechStart() {
       if (micGated()) return;   // half-duplex: only start a turn when idle/listening
+      // v2.0 Phase 8: cancel inactivity timer — user is actively speaking
+      if (inactivityTimer) { clearTimeout(inactivityTimer); inactivityTimer = null; }
       isSpeaking    = true;
       speechStartTs = Date.now();
       sendJson({ type: 'speech_start', session_id: SESSION_ID, timestamp_ms: speechStartTs });
@@ -528,3 +567,215 @@ function cleanup() {
 
 btnConnect.addEventListener('click', connect);
 btnDisconnect.addEventListener('click', disconnect);
+
+// ── v2.0 Phase 8: Porcupine Wake Word ─────────────────────────────────────────
+
+/**
+ * Plays a brief two-note ascending chime (880Hz → 1046Hz) via the Web Audio API.
+ * Uses the TTS playback context (22050Hz) — called before VAD initializes.
+ * PRD_v2.md §A.5
+ */
+function playListeningChime() {
+  const ctx    = getPlaybackCtx();
+  const notes  = [880, 1046.5];
+  let startAt  = ctx.currentTime + 0.05; // slight delay so mic unmutes first
+
+  for (const freq of notes) {
+    const osc  = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type   = 'sine';
+    osc.frequency.setValueAtTime(freq, startAt);
+    gain.gain.setValueAtTime(0, startAt);
+    gain.gain.linearRampToValueAtTime(0.35, startAt + 0.02);       // 20ms attack
+    gain.gain.exponentialRampToValueAtTime(0.001, startAt + 0.15); // 130ms decay
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(startAt);
+    osc.stop(startAt + 0.15);
+    startAt += 0.12; // 120ms gap between notes
+  }
+}
+
+/**
+ * Called when Porcupine detects the wake word.
+ * Opens the WebSocket and starts the active listening flow.
+ */
+async function transitionToWaking() {
+  if (clientState === 'WAKING' || clientState === 'IDLE') return; // guard
+  clientState = 'WAKING';
+  setUIState('WAKING');
+  log('🔔 Wake word detected — activating…', 'sys');
+
+  // 1. Pause Porcupine to free the mic worklet
+  if (porcupine) {
+    try { porcupine.pause(); } catch(_) {}
+  }
+
+  // 2. Play the ascending chime (Web Audio — no network)
+  playListeningChime();
+
+  // 3. Open WebSocket
+  ws = new WebSocket(WS_URL);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = async () => {
+    log('WS connected', 'sys');
+
+    // 4. Send session_init
+    const initMsg = {
+      type: 'session_init',
+      session_id: SESSION_ID,
+      audio_format: { sample_rate: SAMPLE_RATE, channels: 1, bit_depth: 16, encoding: 'pcm_s16le' },
+      client_capabilities: { supports_barge_in: true, vad_library: 'silero-v5', browser: navigator.userAgent.slice(0, 60) },
+    };
+    ws.send(JSON.stringify(initMsg));
+    log('→ session_init', 'out');
+
+    // 5. Send wake_word_detected (PRD_v2.md §A.7 — for server logging only)
+    ws.send(JSON.stringify({
+      type: 'wake_word_detected',
+      session_id: SESSION_ID,
+      keyword: 'porcupine',
+      confidence: 1.0, // Porcupine doesn't expose a confidence score; always 1.0
+      timestamp_ms: Date.now(),
+    }));
+
+    // 6. Init and start Silero VAD
+    await initVAD();
+    vad.start();
+    clientState = 'IDLE';
+    setUIState('IDLE');
+    log('VAD started — speak your command 🎙', 'sys');
+  };
+
+  ws.onmessage = (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      handleBinaryFrame(event.data);
+    } else {
+      try {
+        handleServerMessage(JSON.parse(event.data));
+      } catch {
+        log(`✗ unparseable: ${String(event.data).slice(0, 80)}`, 'err');
+      }
+    }
+  };
+
+  ws.onclose = (event) => {
+    log(`WS closed (${event.code})`, 'sys');
+    // If closed unexpectedly (not by us), revert to ASLEEP
+    if (clientState !== 'ASLEEP') {
+      cleanupToAsleep();
+    }
+  };
+
+  ws.onerror = () => {
+    log('WS error — check server is running on port 8765', 'err');
+    cleanupToAsleep();
+  };
+}
+
+/**
+ * Internal: tears down VAD + WS and goes fully back to ASLEEP,
+ * then resumes Porcupine keyword listening.
+ */
+function cleanupToAsleep() {
+  if (vad)  { try { vad.pause();  } catch(_) {} vad = null; }
+  if (ws)   { try { ws.close();   } catch(_) {} ws  = null; }
+  isSpeaking      = false;
+  assistantSpeaking = false;
+  preBuffer       = [];
+  if (unmuteTimer)    { clearTimeout(unmuteTimer); unmuteTimer = null; }
+  if (inactivityTimer){ clearTimeout(inactivityTimer); inactivityTimer = null; }
+  if (groundingPanel) groundingPanel.style.display = 'none';
+  setMeter(0);
+  clientState = 'ASLEEP';
+  setUIState('ASLEEP');
+  setTranscript('Waiting for wake word…', false);
+  // Resume Porcupine
+  if (porcupine) {
+    try { porcupine.resume(); } catch(_) {}
+    log('💤 Asleep — say "Hey Porcupine" to wake', 'sys');
+  }
+}
+
+/**
+ * Starts the 30-second inactivity timer.
+ * If the user doesn't speak again after turn_complete, returns to ASLEEP.
+ * The timer is cleared on any new speech_start.
+ */
+function startInactivityTimer() {
+  if (inactivityTimer) clearTimeout(inactivityTimer);
+  inactivityTimer = setTimeout(() => {
+    inactivityTimer = null;
+    log('💤 Inactivity timeout — returning to ASLEEP', 'sys');
+    cleanupToAsleep();
+  }, INACTIVITY_MS);
+}
+
+/**
+ * Initializes Porcupine using the built-in "Porcupine" keyword.
+ * If the access key is missing or the SDK is not loaded, falls back to
+ * showing the manual Connect button.
+ */
+async function initPorcupine() {
+  // Check if SDK loaded (script tag present) and key configured
+  const hasSdk = typeof window.PorcupineWeb !== 'undefined';
+  const hasKey = PICOVOICE_KEY && PICOVOICE_KEY !== '__PICOVOICE_KEY_PLACEHOLDER__';
+
+  if (!hasSdk || !hasKey) {
+    // Graceful fallback: show manual connect button
+    log(
+      hasKey
+        ? '⚠ Porcupine SDK not loaded — using manual connect'
+        : '⚠ PICOVOICE_ACCESS_KEY not set — using manual connect',
+      'sys'
+    );
+    setUIState('DISCONNECTED');
+    setTranscript('Waiting for speech…', false);
+    btnConnect.style.display    = '';
+    btnDisconnect.style.display = '';
+    return;
+  }
+
+  // Hide manual buttons — wake word manages the connection lifecycle
+  btnConnect.style.display    = 'none';
+  btnDisconnect.style.display = 'none';
+
+  setUIState('ASLEEP');
+  setTranscript('Say "Hey Porcupine" to start…', false);
+
+  try {
+    // Use the built-in "Porcupine" keyword (available without a custom .ppn file)
+    porcupine = await window.PorcupineWeb.PorcupineWorker.create(
+      PICOVOICE_KEY,
+      { label: 'Porcupine', builtin: 'Porcupine' }, // built-in keyword
+      (detection) => {
+        // Callback fires when wake word is detected
+        if (detection?.label === 'Porcupine' && clientState === 'ASLEEP') {
+          transitionToWaking();
+        }
+      },
+      { publicPath: '/porcupine/porcupine_params.pv' }
+    );
+    await porcupine.start();
+    log('🌙 Porcupine active — say "Hey Porcupine" to wake', 'sys');
+  } catch (err) {
+    console.error('[porcupine] init failed:', err);
+    log(`⚠ Porcupine init failed: ${err.message} — using manual connect`, 'err');
+    porcupine = null;
+    setUIState('DISCONNECTED');
+    btnConnect.style.display    = '';
+    btnDisconnect.style.display = '';
+  }
+}
+
+// ── Page auto-boot ────────────────────────────────────────────────────────────
+// v2.0: Page loads in ASLEEP state. Porcupine initializes immediately.
+// If Porcupine is unavailable (no key/SDK), falls back to manual connect button.
+
+initPorcupine();
+
+// Cancel inactivity timer on any VAD speech_start — user is speaking again
+const _origOnSpeechStart = VAD_CONFIG;
+// The VAD's onSpeechStart is defined inside initVAD();
+// we hook the inactivity cancellation there instead (see initVAD's onSpeechStart).

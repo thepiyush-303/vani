@@ -93,8 +93,8 @@ describe('TRANSCRIBING state', () => {
     expectTransition(ServerState.TRANSCRIBING, 'whisper_partial', ServerState.TRANSCRIBING);
   });
 
-  it('whisper_final → LLM_STREAMING, starts Groq stream', () => {
-    expectTransition(ServerState.TRANSCRIBING, 'whisper_final', ServerState.LLM_STREAMING, 'START_GROQ_STREAM');
+  it('whisper_final → LLM_STREAMING, starts LLM stream', () => {
+    expectTransition(ServerState.TRANSCRIBING, 'whisper_final', ServerState.LLM_STREAMING, 'START_LLM_STREAM');
   });
 
   it('whisper_error → IDLE, notifies client', () => {
@@ -128,7 +128,7 @@ describe('LLM_STREAMING state', () => {
     expect(isTransitionError(result)).toBe(false);
     if (!isTransitionError(result)) {
       expect(result.nextState).toBe(ServerState.BARGE_IN_INTERRUPTED);
-      expect(result.sideEffects).toContain('ABORT_GROQ_STREAM');
+      expect(result.sideEffects).toContain('ABORT_LLM_STREAM');
       expect(result.sideEffects).toContain('KILL_PIPER');
     }
   });
@@ -156,12 +156,12 @@ describe('TTS_STREAMING state', () => {
 // ── TOOL_EXECUTING ───────────────────────────────────────────
 
 describe('TOOL_EXECUTING state', () => {
-  it('tool_result_ready → LLM_STREAMING, re-enters Groq stream', () => {
-    expectTransition(ServerState.TOOL_EXECUTING, 'tool_result_ready', ServerState.LLM_STREAMING, 'START_GROQ_STREAM');
+  it('tool_result_ready → LLM_STREAMING, re-enters LLM stream', () => {
+    expectTransition(ServerState.TOOL_EXECUTING, 'tool_result_ready', ServerState.LLM_STREAMING, 'START_LLM_STREAM');
   });
 
-  it('tool_timeout → LLM_STREAMING, injects error + re-enters Groq stream', () => {
-    expectTransition(ServerState.TOOL_EXECUTING, 'tool_timeout', ServerState.LLM_STREAMING, 'START_GROQ_STREAM');
+  it('tool_timeout → LLM_STREAMING, injects error + re-enters LLM stream', () => {
+    expectTransition(ServerState.TOOL_EXECUTING, 'tool_timeout', ServerState.LLM_STREAMING, 'START_LLM_STREAM');
   });
 
   it('speech_start in TOOL_EXECUTING → INVALID_STATE', () => {
