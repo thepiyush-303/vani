@@ -1,10 +1,37 @@
-node_modules
+# Dependency directories
+node_modules/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build and compilation
+dist/
+build/
+*.tsbuildinfo
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Environment variables
 .env
+.env.*
+!.env.example
+
+# Test audio and generated files
+dummy.pcm
+coverage/
+
+# Documentation and project notes
 PRD.md
+PRD_v2.md
 CLAUDE.md
 PROGRESS.md
-run-smoke.sh
 codebase_walkthrough.md
-venv
-dist
-__pycache__
+
+# Standalone run scripts and test files
+run-smoke.sh
+test_ws.js
+test_whisper.py
+smoke-client.ts
