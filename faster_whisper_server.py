@@ -9,9 +9,11 @@ stdin protocol  (length-prefixed PCM):
     [4-byte uint32 LE = 0x00000000]  ← end-of-utterance sentinel
 
 stdout protocol (newline-delimited JSON):
-    {"type": "partial", "text": "...", "ts": 1234567890.123}
     {"type": "final",   "text": "...", "duration_ms": 145, "ts": 1234567890.456}
     {"type": "error",   "code": "DECODE_FAIL", "msg": "..."}
+
+Whisper only emits finals — it cannot transcribe a partially-buffered utterance.
+Live interim captions come from vosk_server.py.
 
 stderr: debug/startup logs (Node.js forwards to console.error)
 """
@@ -30,6 +32,12 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base.en")
 DOWNLOAD_ROOT = os.environ.get("WHISPER_MODEL_DIR", "/tmp/whisper_models")
 SAMPLE_RATE   = 16000  # Hz — must match client capture rate
 
+# Domain vocabulary: names/jargon Whisper mishears. Supplied via VANI_VOCAB
+# (comma-separated) and/or a vocab.txt file (one term per line, # for comments).
+# Passed as initial_prompt so the decoder is primed with the correct spellings.
+VOCAB_FILE = os.environ.get("VANI_VOCAB_FILE", "vocab.txt")
+VOCAB_ENV  = os.environ.get("VANI_VOCAB", "")
+
 def log_err(msg):
     """Write to stderr so Node.js can forward to server logs."""
     print(f"[whisper] {msg}", file=sys.stderr, flush=True)
@@ -38,6 +46,45 @@ def emit(obj):
     """Write a newline-delimited JSON line to stdout."""
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
+
+# ── Vocabulary biasing ────────────────────────────────────────────────────────
+
+def load_vocab_prompt():
+    """
+    Build the initial_prompt string from VANI_VOCAB and the vocab file.
+    Returns None when no vocabulary is configured (keeps decoding unbiased).
+    """
+    terms = [t.strip() for t in VOCAB_ENV.split(",")]
+
+    if os.path.isfile(VOCAB_FILE):
+        try:
+            with open(VOCAB_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.split("#", 1)[0].strip()
+                    if line:
+                        terms.append(line)
+        except Exception as e:
+            log_err(f"Could not read vocab file '{VOCAB_FILE}': {e}")
+
+    # De-duplicate, preserve order, drop empties
+    seen, unique = set(), []
+    for t in terms:
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            unique.append(t)
+
+    if not unique:
+        return None
+
+    # Whisper's initial_prompt is a text fragment, not a word list — phrasing it
+    # as prose primes the decoder far better than bare comma-separated tokens.
+    # Keep it short: a long prompt costs decode time and can bleed into output.
+    prompt = "Glossary: " + ", ".join(unique) + "."
+    log_err(f"Vocabulary biasing enabled ({len(unique)} terms).")
+    return prompt
+
+
+VOCAB_PROMPT = load_vocab_prompt()
 
 # ── Load model at startup (once, persistent) ──────────────────────────────────
 
@@ -103,14 +150,8 @@ def read_stdin_loop():
                 log_err(f"Truncated frame: expected {byte_count} bytes, got {len(pcm_bytes)}")
                 break
             audio_chunks.append(pcm_bytes)
-
-            if len(audio_chunks) % 20 == 0:
-                # log_err(f"Buffered {len(audio_chunks)} frames...")
-                emit({
-                    "type": "partial",
-                    "text": "...",
-                    "ts": time.time(),
-                })
+            # No partials here: Whisper cannot produce interim results for a
+            # partially-buffered utterance. Live captions come from vosk_server.py.
 
 
 def transcribe(float32_audio: np.ndarray, utterance_start: float):
@@ -125,10 +166,18 @@ def transcribe(float32_audio: np.ndarray, utterance_start: float):
             vad_filter=False,          # VAD handled client-side (PRD §2.2)
             word_timestamps=False,
             condition_on_previous_text=False,  # each utterance is independent; skip cross-utterance context (faster, no hallucinated carry-over)
+            initial_prompt=VOCAB_PROMPT,       # domain vocabulary biasing (None when unconfigured)
         )
 
         # Collect all segments (generator) into final text
         full_text = " ".join(seg.text.strip() for seg in segments).strip()
+
+        # On near-silent audio Whisper sometimes parrots the initial_prompt back.
+        # Never let the glossary reach the LLM as if the user had said it.
+        if VOCAB_PROMPT and full_text.lower().startswith("glossary:"):
+            log_err("Discarded transcription that echoed the vocabulary prompt.")
+            full_text = ""
+
         duration_ms = int((time.time() - t0) * 1000)
 
         if not full_text:

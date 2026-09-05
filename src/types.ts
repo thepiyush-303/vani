@@ -44,6 +44,8 @@ export type IncomingEventType =
   | 'whisper_partial'     // internal: from Whisper subprocess stdout
   | 'whisper_final'       // internal: from Whisper subprocess stdout
   | 'whisper_error'       // internal: from Whisper subprocess stdout
+  | 'vosk_partial'        // internal: live interim caption from Vosk (display-only)
+  | 'vosk_final'          // internal: Vosk end-of-utterance caption (display-only)
   | 'llm_token'           // internal: text delta from Groq/Gemini
   | 'llm_tool_call'       // internal: tool_call delta from Groq/Gemini
   | 'llm_stream_complete' // internal: LLM stream finished
@@ -202,6 +204,16 @@ export interface GroundingSourcesMessage {
   timestamp_ms: number;
 }
 
+// Sent once, right after session_ack: the durable transcript from earlier
+// sessions so the client can populate its history sidebar. Display-only —
+// distinct from the LLM's in-prompt context. `session_id` on each turn is the
+// session it was spoken in, which the client uses to draw session dividers.
+export interface HistoryLoadMessage {
+  type: 'history_load';
+  session_id: string;
+  turns: Array<{ role: 'user' | 'assistant'; content: string; session_id: string; ts: number }>;
+}
+
 export type ServerMessage =
   | SessionAckMessage
   | StateChangeMessage
@@ -212,7 +224,8 @@ export type ServerMessage =
   | TtsInterruptedMessage
   | TurnCompleteMessage
   | ErrorMessage
-  | GroundingSourcesMessage;
+  | GroundingSourcesMessage
+  | HistoryLoadMessage;
 
 // ── Session Context ───────────────────────────────────────────
 
@@ -237,6 +250,9 @@ export interface SessionContext {
   speechEndAt?: number | null;
   sttFinalAt?: number | null;
   firstTokenAt?: number | null;
+  // First live Vosk caption of the turn — measures how fast the user sees words
+  // appear, which is the responsiveness the live-STT work is meant to improve.
+  voskFirstPartialAt?: number | null;
   // Set just before a NOTIFY_CLIENT_ERROR side-effect so the dispatcher can
   // send the real error code+message to the client. Cleared after sending.
   pendingError?: { code: ErrorMessage['code']; message: string };

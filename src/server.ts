@@ -13,23 +13,30 @@ import { SessionInitMessage, ServerMessage } from './types';
 import { createSession, SessionStore } from './session';
 import { handleTextMessage, handleBinaryMessage, handleInternalEvent } from './messageHandler';
 import { initSubprocesses } from './sideEffects';
+import { initContextStore, loadRecentTurns } from './contextStore';
 import * as whisperProcess from './whisperProcess';
+import * as voskProcess from './voskProcess';
 import * as piperProcess from './piperProcess';
 
 const PORT = parseInt(process.env.PORT ?? '8765', 10);
 const HTTP_PORT = parseInt(process.env.HTTP_PORT ?? '3000', 10);
 const SERVER_VERSION = '0.1.0';
-const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+// The frontend is a Vite app in client/. Production serves its build output;
+// `npm run build` inside client/ produces it. During frontend development the
+// Vite dev server serves the same files on its own port and talks to this
+// process over the WebSocket only.
+const PUBLIC_DIR = path.join(__dirname, '..', 'client', 'dist');
 
 
 const wss = new WebSocketServer({ port: PORT });
 
-// ── HTTP static file server (serves public/) ──────────────────
+// ── HTTP static file server (serves client/dist/) ─────────────
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js':   'application/javascript; charset=utf-8',
   '.css':  'text/css; charset=utf-8',
   '.ico':  'image/x-icon',
+  '.svg':  'image/svg+xml',
   '.wasm': 'application/wasm',
   '.onnx': 'application/octet-stream',
 };
@@ -38,7 +45,7 @@ const httpServer = http.createServer((req, res) => {
   const urlPath = req.url === '/' ? '/index.html' : (req.url ?? '/index.html');
   const filePath = path.join(PUBLIC_DIR, path.normalize(urlPath));
 
-  // Security: prevent directory traversal outside public/
+  // Security: prevent directory traversal outside client/dist/
   if (!filePath.startsWith(PUBLIC_DIR)) {
     res.writeHead(403);
     res.end('Forbidden');
@@ -61,9 +68,15 @@ const httpServer = http.createServer((req, res) => {
 
 httpServer.listen(HTTP_PORT, () => {
   console.log(`[server] HTTP static server listening on http://localhost:${HTTP_PORT}`);
+  if (!fs.existsSync(PUBLIC_DIR)) {
+    console.warn(`[server] ${PUBLIC_DIR} not found — the frontend has not been built. Run: cd client && npm run build`);
+  }
 });
 
 console.log(`[server] WebSocket server listening on port ${PORT}`);
+
+// Open the durable transcript store (disables itself if better-sqlite3 is absent).
+initContextStore();
 
 // ── Initialize subprocesses (Whisper + Piper) ─────────────────
 // Wire internal Whisper transcript events through the state machine.
@@ -151,6 +164,20 @@ wss.on('connection', (ws: WebSocket) => {
       };
       ws.send(JSON.stringify(ack));
 
+      // ── Send the durable transcript for the history sidebar ──
+      // Display-only past turns (earlier sessions + this session's prior turns).
+      // No-op payload when the store is disabled or empty.
+      const pastTurns = loadRecentTurns();
+      if (pastTurns.length > 0) {
+        const history: ServerMessage = {
+          type: 'history_load',
+          session_id: sessionId,
+          turns: pastTurns,
+        };
+        ws.send(JSON.stringify(history));
+        console.log(`[server] Sent ${pastTurns.length} past turns to session ${sessionId}`);
+      }
+
       // ── Register post-init message handler ────────────────
       ws.on('message', (msgData, msgIsBinary) => {
         if (!initialized) return;
@@ -192,6 +219,7 @@ wss.on('error', (err) => {
 process.on('SIGINT', () => {
   console.log('\n[server] SIGINT received — shutting down gracefully');
   whisperProcess.stop();
+  voskProcess.stop();
   piperProcess.stop();
   httpServer.close();
   wss.close(() => {
@@ -203,6 +231,7 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   console.log('[server] SIGTERM received — shutting down gracefully');
   whisperProcess.stop();
+  voskProcess.stop();
   piperProcess.stop();
   httpServer.close();
   wss.close(() => process.exit(0));

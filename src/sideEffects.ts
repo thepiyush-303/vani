@@ -6,6 +6,7 @@
 import WebSocket from 'ws';
 import { SideEffectName, SessionContext, ServerMessage, ServerState, IncomingEventType } from './types';
 import * as whisperProcess from './whisperProcess';
+import * as voskProcess from './voskProcess';
 import * as piperProcess from './piperProcess';
 import { SentenceBuffer } from './sentenceBuffer';
 import { startGroqStream, abortGroqStream } from './groqStream';
@@ -72,11 +73,39 @@ export function initSubprocesses(
     }
   });
 
+  // Wire Vosk live-caption events → internal state machine events.
+  // These are display-only: they never enter conversationHistory.
+  voskProcess.onVoskEvent((ev) => {
+    switch (ev.type) {
+      case 'partial':
+        emitInternalEvent('vosk_partial', { text: ev.text });
+        break;
+      case 'final':
+        emitInternalEvent('vosk_final', { text: ev.text });
+        break;
+      case 'error':
+        // Non-fatal: live captions degrade, Whisper finals are unaffected.
+        console.error(`[vosk] ${ev.code}: ${ev.msg}`);
+        break;
+    }
+  });
+
   // Start Whisper subprocess
   whisperProcess.start();
 
+  // Start Vosk subprocess (optional — disables itself if the model is missing)
+  voskProcess.start();
+
   // Start Piper subprocess (optional — warns if model not configured)
   piperProcess.start();
+}
+
+/**
+ * Feed one live PCM frame to the streaming recognizer.
+ * Called per binary frame from messageHandler — no-op when Vosk is unavailable.
+ */
+export function feedLiveStt(pcm: Buffer): void {
+  voskProcess.writeChunk(pcm);
 }
 
 // ── Dispatcher ─────────────────────────────────────────────────
@@ -137,7 +166,8 @@ export function dispatchSideEffects(
 function openWhisperPipe(ctx: SessionContext): void {
   ctx.audioBuffer = [];
   whisperProcess.start(); // idempotent — no-op if already running
-  console.log(`[${ctx.sessionId}] OPEN_WHISPER_PIPE — audio buffer cleared, Whisper ready`);
+  voskProcess.resetSilent();  // drop any leftover recognizer state from the last turn
+  console.log(`[${ctx.sessionId}] OPEN_WHISPER_PIPE — audio buffer cleared, STT ready`);
 }
 
 function sendEofToWhisper(ctx: SessionContext): void {
@@ -153,12 +183,16 @@ function sendEofToWhisper(ctx: SessionContext): void {
 
   // Send end-of-utterance sentinel
   whisperProcess.sendEof();
+
+  // Vosk already has every frame (fed live) — just flush its final caption.
+  voskProcess.finalizeUtterance();
 }
 
 function discardWhisperBuffer(ctx: SessionContext): void {
   console.log(`[${ctx.sessionId}] DISCARD_WHISPER_BUFFER — dropping ${ctx.audioBuffer.length} frames`);
   ctx.audioBuffer = [];
   whisperProcess.discard();
+  voskProcess.resetSilent();  // discard live captions for the misfired utterance
 }
 
 // ── Real Piper side-effects ────────────────────────────────────

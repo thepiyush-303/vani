@@ -11,13 +11,14 @@
   },
   "dependencies": {
     "@google/genai": "^2.19.0",
-    "@picovoice/porcupine-web": "^4.0.1",
+    "better-sqlite3": "^11.8.1",
     "dotenv": "^17.4.2",
     "groq-sdk": "^1.5.0",
     "uuid": "^9.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.14.0",
     "@types/uuid": "^9.0.8",

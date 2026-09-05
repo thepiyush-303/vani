@@ -23,6 +23,12 @@ Thumbs.db
 dummy.pcm
 coverage/
 
+# Local model weights (Vosk, Piper) — downloaded, never committed
+models/
+
+# Durable conversation transcript (SQLite) — local user data, never committed
+data/
+
 # Documentation and project notes
 PRD.md
 PRD_v2.md

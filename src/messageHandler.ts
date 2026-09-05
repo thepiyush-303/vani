@@ -6,8 +6,9 @@
 import WebSocket from 'ws';
 import { SessionContext, ServerState, ClientMessage, ServerMessage, IncomingEventType } from './types';
 import { transition, isTransitionError } from './stateMachine';
-import { dispatchSideEffects, emitStateChange, sendJson } from './sideEffects';
+import { dispatchSideEffects, emitStateChange, sendJson, feedLiveStt } from './sideEffects';
 import { getActiveSentenceBuffer, setActiveSentenceBuffer } from './sharedState';
+import { appendTurn } from './contextStore';
 
 /**
  * Handle a text (JSON) message from the client.
@@ -43,6 +44,7 @@ export function handleTextMessage(
       ctx.speechEndAt = null;
       ctx.sttFinalAt = null;
       ctx.firstTokenAt = null;
+      ctx.voskFirstPartialAt = null;
       runTransition(ws, ctx, 'speech_start');
       break;
     }
@@ -90,7 +92,11 @@ export function handleBinaryMessage(
   }
 
   // Buffer the PCM chunk in-memory (no disk writes per PRD §1.3 privacy req)
+  // Whisper needs the whole utterance, so it is flushed at speech_end.
   ctx.audioBuffer.push(buf);
+
+  // Vosk recognizes as the audio arrives, producing live captions mid-utterance.
+  feedLiveStt(buf);
 
   // State machine: LISTENING + pcm_binary → LISTENING (no state_change emitted)
   const result = transition(ctx.state, 'pcm_binary');
@@ -172,6 +178,38 @@ export function handleInternalEvent(
       break;
     }
 
+    // ── Live Vosk captions (display-only) ─────────────────────
+    // Never enter conversationHistory: Whisper's final is what the LLM sees.
+    // No state transition — these arrive continuously while LISTENING.
+    case 'vosk_partial':
+    case 'vosk_final': {
+      const text = ((p?.text as string) ?? '').trim();
+      if (!text) break;
+
+      // Captions belong to the utterance being spoken/transcribed. Once the LLM
+      // is answering, a late frame would overwrite the response text in the UI.
+      if (ctx.state !== ServerState.LISTENING && ctx.state !== ServerState.TRANSCRIBING) {
+        break;
+      }
+
+      if (eventType === 'vosk_partial' && !ctx.voskFirstPartialAt) {
+        ctx.voskFirstPartialAt = Date.now();
+        if (ctx.turnStartedAt) {
+          console.log(`[latency] first live caption: ${ctx.voskFirstPartialAt - ctx.turnStartedAt}ms after speech_start`);
+        }
+      }
+
+      const msg: ServerMessage = {
+        type: 'transcript_partial',
+        session_id: ctx.sessionId,
+        text,
+        confidence: null,
+        timestamp_ms: Date.now(),
+      };
+      sendJson(ws, msg);
+      break;
+    }
+
     case 'whisper_final': {
       const text        = (p?.text as string) ?? '';
       const duration_ms = (p?.duration_ms as number) ?? 0;
@@ -202,6 +240,9 @@ export function handleInternalEvent(
 
       // 2. Append user turn to conversation history for Groq multi-turn
       ctx.conversationHistory.push({ role: 'user', content: text });
+
+      // Persist the user turn to the durable transcript (no-op if disabled).
+      appendTurn(ctx.sessionId, 'user', text);
 
       // 3. Transition TRANSCRIBING → LLM_STREAMING
       runTransition(ws, ctx, 'whisper_final');
@@ -252,6 +293,14 @@ export function handleInternalEvent(
     }
 
     case 'llm_stream_complete': {
+      // Persist the assistant's spoken answer to the durable transcript. The
+      // full text arrives on this event (from groq/geminiStream); the tool-call
+      // path sends empty text here and is intentionally not persisted.
+      const fullText = (p?.fullText as string) ?? '';
+      if (fullText.trim()) {
+        appendTurn(ctx.sessionId, 'assistant', fullText.trim());
+      }
+
       // Flush any remaining buffered text to Piper
       const activeSentenceBuffer = getActiveSentenceBuffer();
       if (activeSentenceBuffer) {

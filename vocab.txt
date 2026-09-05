@@ -1,0 +1,17 @@
+# vocab.txt — domain vocabulary for Whisper biasing
+#
+# One term per line. Blank lines and # comments are ignored.
+# These terms are passed to Whisper as an initial_prompt so uncommon names and
+# jargon are spelled correctly instead of being guessed phonetically.
+#
+# Keep this list short (roughly 30 terms or fewer). A long prompt slows decoding
+# and makes Whisper more likely to echo the glossary back on near-silent audio.
+#
+# Also settable via the VANI_VOCAB env var (comma-separated); the two are merged.
+
+Vani
+Solari
+Todoist
+Groq
+Piper
+Vosk
